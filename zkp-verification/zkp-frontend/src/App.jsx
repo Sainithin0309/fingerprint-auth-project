@@ -3,7 +3,7 @@ import { ethers } from 'ethers';
 import './App.css';
 import verifierArtifact from '../../artifacts/contracts/Verifier.sol/Groth16Verifier.json';
 
-const CONTRACT_ADDRESS = '0x5FbDB2315678afecb367f032d93F642f64180aa3'; // Replace with your deployed contract address
+const CONTRACT_ADDRESS = '0x9457BE3F595c8504e4105a6306b92d65F6CaeEE9';
 
 // Define users with access permissions
 const users = {
