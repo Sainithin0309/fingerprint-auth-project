@@ -135,11 +135,14 @@
                 return;
             }
 
-            const publicKeyOptions = {
-                challenge: new Uint8Array(32),
-                rpId: "localhost",
-                userVerification: "required"
-            };
+const publicKeyOptions = {
+  challenge: new Uint8Array(32),
+  rp: {
+    name: "Fingerprint Authentication",
+    id: "fingerprint-auth-using-zkp.onrender.com"
+  },
+  userVerification: "required"
+};
 
             try {
                 const assertion = await navigator.credentials.get({ publicKey: publicKeyOptions });
