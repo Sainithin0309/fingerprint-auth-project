@@ -57,6 +57,6 @@ document.getElementById('passToWeb3Btn').addEventListener('click', () => {
     const zkpParam = encodeURIComponent(JSON.stringify(onchainProof));
     const userParam = encodeURIComponent(user_id);
     // Change the URL below to your actual Web3Flix server address and port
-    const web3flixUrl = `http://localhost:5173/?zkp=${zkpParam}&userid=${userParam}`;
+const web3flixUrl = `https://fingerprint-auth-project-aaw1lu5t9.vercel.app/?zkp=${zkpParam}&userid=${userParam}`;
     window.open(web3flixUrl, '_blank');
 });
