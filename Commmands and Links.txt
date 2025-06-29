@@ -1,0 +1,8 @@
+Commands:
+1)python app.py --> to run the server for fingerprint authentication and ZKP Generation.
+2)run this command in zkp-verification directory --> npx hardhat node --> to run the testnet.
+3)run this command in zkp-verification directory --> npx hardhat run scripts/deploy.js --network localhost --> to deploy the smart contract into testnet.
+4)run this command in zkp-frontend directory --> npm run dev --> to run the web3.0 page.
+Links:
+1)registration page: http://localhost:5000/
+2)validation and zkp generarion page: http://localhost:5000/validate_page

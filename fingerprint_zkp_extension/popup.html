@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>ZKP Fetcher</title>
+    <style>
+      body {
+        background: #1e1e2f;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        min-width: 320px;
+        min-height: 420px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
+      .container {
+        background: #23234a;
+        border-radius: 32px;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+        padding: 32px 28px 24px 28px;
+        width: 320px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .logo {
+        width: 56px;
+        height: 56px;
+        margin-bottom: 12px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #6e8efb 0%, #a777e3 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        color: #fff;
+        font-weight: bold;
+        letter-spacing: 2px;
+        box-shadow: 0 2px 12px rgba(110,142,251,0.15);
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 10px 12px;
+        margin: 8px 0;
+        border: none;
+        border-radius: 16px;
+        background: #2d2d5a;
+        color: #fff;
+        font-size: 15px;
+        outline: none;
+        transition: background 0.2s;
+      }
+      button {
+        width: 100%;
+        padding: 11px 0;
+        margin: 10px 0 0 0;
+        border: none;
+        border-radius: 16px;
+        background: linear-gradient(90deg, #6e8efb 0%, #a777e3 100%);
+        color: #fff;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s, transform 0.1s;
+        box-shadow: 0 2px 8px rgba(110,142,251,0.15);
+      }
+      button:hover {
+        filter: brightness(1.08);
+        transform: translateY(-2px) scale(1.02);
+      }
+      #passToWeb3Btn {
+        margin-top: 18px; /* Increased margin for separation */
+        border-radius: 16px;
+        background: linear-gradient(90deg, #ffb86c 0%, #ff6e6e 100%);
+        width: 100%;
+        display: block;
+        box-shadow: 0 2px 12px rgba(255,184,108,0.15);
+      }
+      pre#result {
+        background: #181828;
+        color: #b3b3ff;
+        border-radius: 16px;
+        padding: 12px;
+        width: 100%;
+        min-height: 48px;
+        margin-top: 18px;
+        margin-bottom: 10px; /* Add space below the result box */
+        font-size: 13px;
+        overflow-x: auto;
+        box-sizing: border-box;
+        box-shadow: 0 2px 8px rgba(110,142,251,0.10);
+      }
+      @media (max-width: 350px) {
+        .container {
+          width: 98vw;
+          padding: 12px 4px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <!-- Removed the logo div -->
+      <h3 style="font-size: 2rem; color: #fff; font-weight: bold; margin-bottom: 18px; text-shadow: 0 2px 12px #6e8efb;">WEB3.0 Authenticator</h3>
+      <input id="user_id" type="text" placeholder="User ID" /><br/>
+      <input id="otp" type="text" placeholder="OTP" /><br/>
+      <button id="fetchBtn">Fetch ZKP</button>
+      <pre id="result"></pre>
+      <button id="passToWeb3Btn">Pass to Web3</button>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

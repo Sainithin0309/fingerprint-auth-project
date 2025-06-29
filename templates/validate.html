@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fingerprint Validation & ZKP Generation</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            background: linear-gradient(120deg, #020003, #000000);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .container {
+            background: rgba(0, 213, 60, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 2.5rem 3rem;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        h1 {
+            color: white;
+            font-size: 1.8rem;
+            margin-bottom: 2rem;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        h2 {
+            color: #2ecc71;
+            font-size: 1.4rem;
+            margin-top: 2rem;
+        }
+
+        input {
+            width: 100%;
+            padding: 12px 15px;
+            margin: 10px 0;
+            border: none;
+            border-radius: 25px;
+            background: rgba(255, 255, 255, 0.9);
+            font-size: 16px;
+            transition: all 0.3s ease;
+            box-sizing: border-box;
+        }
+
+        input:focus {
+            outline: none;
+            background: white;
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.3);
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            margin-top: 20px;
+            border: none;
+            border-radius: 25px;
+            background: #2ecc71;
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        button:hover {
+            background: #27ae60;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        #statusMessage {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            min-height: 20px;
+        }
+
+        #otpDisplay {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2ecc71;
+            margin: 15px 0;
+            padding: 15px;
+            background: rgba(46, 204, 113, 0.1);
+            border-radius: 10px;
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                padding: 2rem 1.5rem;
+                width: 95%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Fingerprint Validation & ZKP Generation</h1>
+        <input type="text" id="user_id" placeholder="Enter User ID" required>
+        <button onclick="validateFingerprint()">Validate Fingerprint</button>
+        <div id="statusMessage"></div>
+        <h2>OTP for Browser Plugin:</h2>
+        <p id="otpDisplay"></p>
+        <div id="timer" style="font-size:16px; color:#ff5555; margin-top:10px;"></div>
+    </div>
+
+    <script>
+        let otpTimer = null;
+        let otpTimeout = null;
+
+        async function validateFingerprint() {
+            const userId = document.getElementById("user_id").value;
+            if (!userId) {
+                alert("Please enter a User ID");
+                return;
+            }
+
+            const publicKeyOptions = {
+                challenge: new Uint8Array(32),
+                rpId: "localhost",
+                userVerification: "required"
+            };
+
+            try {
+                const assertion = await navigator.credentials.get({ publicKey: publicKeyOptions });
+
+                if (!assertion) {
+                    alert("Fingerprint validation failed.");
+                    return;
+                }
+
+                const credentialId = btoa(String.fromCharCode(...new Uint8Array(assertion.rawId)));
+
+                const response = await fetch('http://localhost:5000/validate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: userId,
+                        credential_id: credentialId
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.status === "success") {
+                    document.getElementById("statusMessage").innerText = "Fingerprint validated successfully!";
+                    document.getElementById("otpDisplay").innerText = `Your OTP: ${result.otp}`;
+                    startOtpTimer();
+                } else {
+                    document.getElementById("statusMessage").innerText = `Validation failed: ${result.message}`;
+                    clearOtpDisplay();
+                }
+            } catch (error) {
+                alert("Fingerprint validation failed: " + error);
+            }
+        }
+
+        function startOtpTimer() {
+            let timeLeft = 60;
+            document.getElementById("timer").innerText = `OTP expires in ${timeLeft} seconds`;
+            clearTimeout(otpTimeout);
+            clearInterval(otpTimer);
+
+            otpTimer = setInterval(() => {
+                timeLeft--;
+                if (timeLeft > 0) {
+                    document.getElementById("timer").innerText = `OTP expires in ${timeLeft} seconds`;
+                } else {
+                    clearInterval(otpTimer);
+                    clearOtpDisplay();
+                }
+            }, 1000);
+
+            otpTimeout = setTimeout(() => {
+                clearOtpDisplay();
+            }, 60000);
+        }
+
+        function clearOtpDisplay() {
+            document.getElementById("otpDisplay").innerText = "";
+            document.getElementById("timer").innerText = "OTP expired.";
+        }
+
+        // Call this function from your browser plugin after fetching ZKP successfully
+        function pluginClearOtp() {
+            clearOtpDisplay();
+        }
+    </script>
+</body>
+</html>
