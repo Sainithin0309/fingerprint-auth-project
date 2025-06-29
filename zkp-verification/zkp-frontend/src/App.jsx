@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ethers } from 'ethers';
 import './App.css';
-import verifierArtifact from '../../artifacts/contracts/Verifier.sol/Groth16Verifier.json';
+import verifierArtifact from './abi/Groth16Verifier.json';
 
 const CONTRACT_ADDRESS = '0x9457BE3F595c8504e4105a6306b92d65F6CaeEE9';
 

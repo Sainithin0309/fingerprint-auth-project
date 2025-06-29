@@ -1,17 +1,16 @@
 {
-    "manifest_version": 3,
-    "name": "Fingerprint ZKP Fetcher",
-    "version": "1.0",
-    "description": "Fetches ZKP using user ID and OTP, and passes it to Web3 pages.",
-    "permissions": ["scripting", "activeTab"],
-    "host_permissions": [
-      "http://127.0.0.1:5000/",
-      "http://localhost:5000/"
-    ],
-    "action": {
-      "default_popup": "popup.html"
-    },
-    "background": {
-      "service_worker": "background.js"
-    }
+  "manifest_version": 3,
+  "name": "Fingerprint ZKP Fetcher",
+  "version": "1.0",
+  "description": "Fetches ZKP using user ID and OTP, and passes it to Web3 pages.",
+  "permissions": ["scripting", "activeTab"],
+  "host_permissions": [
+    "https://fingerprint-auth-using-zkp.onrender.com/"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   }
+}

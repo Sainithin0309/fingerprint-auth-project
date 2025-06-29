@@ -6,7 +6,8 @@ document.getElementById('fetchBtn').addEventListener('click', async () => {
     const resultEl = document.getElementById('result');
 
     try {
-        const response = await fetch('http://127.0.0.1:5000/get_zkp', {
+        const response = await fetch('https://fingerprint-auth-using-zkp.onrender.com/get_zkp', {
+
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user_id, otp })
@@ -19,8 +20,7 @@ document.getElementById('fetchBtn').addEventListener('click', async () => {
             // Remove OTP from the validate.html page if open
             // Try both localhost and 127.0.0.1 for compatibility
             const urls = [
-                "http://127.0.0.1:5000/validate_page",
-                "http://localhost:5000/validate_page"
+                "https://fingerprint-auth-using-zkp.onrender.com/validate_page"
             ];
             for (const url of urls) {
                 const pages = await chrome.tabs.query({ url });
