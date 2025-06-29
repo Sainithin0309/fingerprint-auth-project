@@ -16,22 +16,28 @@ conn = psycopg2.connect(os.environ["DATABASE_URL"])
 cur = conn.cursor()
 
 # Create necessary tables
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        name TEXT,
-        dob TEXT,
-        country TEXT,
-        credential_id TEXT UNIQUE
-    )
-""")
-cur.execute("""
-    CREATE TABLE IF NOT EXISTS zkp_storage (
-        user_id TEXT PRIMARY KEY REFERENCES users(user_id),
-        zkp_proof TEXT
-    )
-""")
-conn.commit()
+try:
+    # Create necessary tables
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            name TEXT,
+            dob TEXT,
+            country TEXT,
+            credential_id TEXT UNIQUE
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS zkp_storage (
+            user_id TEXT PRIMARY KEY REFERENCES users(user_id),
+            zkp_proof TEXT
+        )
+    """)
+    conn.commit()
+except Exception as e:
+    print("Error creating tables:", e)
+    conn.rollback()
+
 
 # In-memory OTP store
 otp_storage = {}
