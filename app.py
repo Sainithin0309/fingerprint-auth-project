@@ -12,12 +12,15 @@ app = Flask(__name__, template_folder='templates')
 CORS(app)
 
 # PostgreSQL connection setup
-conn = psycopg2.connect(os.environ["DATABASE_URL"])
-cur = conn.cursor()
+try:
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    cur = conn.cursor()
+except Exception as e:
+    print(f"Failed to connect to DB: {e}")
+    raise
 
 # Create necessary tables
 try:
-    # Create necessary tables
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
@@ -35,9 +38,9 @@ try:
     """)
     conn.commit()
 except Exception as e:
-    print("Error creating tables:", e)
     conn.rollback()
-
+    print(f"Table creation failed: {e}")
+    raise
 
 # In-memory OTP store
 otp_storage = {}
@@ -54,63 +57,72 @@ def validate_page():
 def register():
     try:
         data = request.json
-        user_id = data.get('user_id')
-        name = data.get('name')
-        dob = data.get('dob')
-        country = data.get('country')
-        credential_id = data.get('credential_id')
+        required_fields = ['user_id', 'name', 'dob', 'country', 'credential_id']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({"status": "error", "message": f"Missing field: {field}"}), 400
 
         cur.execute("""
             INSERT INTO users (user_id, name, dob, country, credential_id)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-        """, (user_id, name, dob, country, credential_id))
+            ON CONFLICT (user_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                dob = EXCLUDED.dob,
+                country = EXCLUDED.country,
+                credential_id = EXCLUDED.credential_id
+        """, (
+            data["user_id"],
+            data["name"],
+            data["dob"],
+            data["country"],
+            data["credential_id"]
+        ))
         conn.commit()
 
         return jsonify({"status": "success", "message": "User registered successfully"}), 200
     except Exception as e:
+        conn.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 def generate_real_zk_proof_credential_id(credential_id_b64):
-    # Decode base64 to bytes
-    cred_bytes = base64.b64decode(credential_id_b64)
+    try:
+        cred_bytes = base64.b64decode(credential_id_b64)
+    except Exception:
+        raise ValueError("Invalid base64 credential_id")
+
     cred_bytes = list(cred_bytes)[:32]
     cred_bytes += [0] * (32 - len(cred_bytes))
+
     if len(cred_bytes) != 32:
         raise ValueError("credential_id bytes must be exactly 32 bytes")
 
-    # Save input.json for the Circom circuit
-    input_data = {
-        "credential_id": cred_bytes
-    }
+    input_data = {"credential_id": cred_bytes}
     with open("input.json", "w") as f:
         json.dump(input_data, f)
 
-    # Run witness generation and proof as before, but with new circuit/wasm/zkey
     subprocess.run([
-        "node", "CredentialIDHash_js/generate_witness.js", "CredentialIDHash_js/CredentialIDHash.wasm", "input.json", "witness.wtns"
+        "node", "CredentialIDHash_js/generate_witness.js", 
+        "CredentialIDHash_js/CredentialIDHash.wasm", 
+        "input.json", "witness.wtns"
     ], check=True)
 
     snarkjs_path = shutil.which("snarkjs")
+    if not snarkjs_path:
+        raise FileNotFoundError("snarkjs not found in PATH")
+
     subprocess.run([
-        snarkjs_path, "groth16", "prove", "CredentialIDHash_final.zkey", "witness.wtns", "proof.json", "public.json"
+        snarkjs_path, "groth16", "prove", 
+        "CredentialIDHash_final.zkey", "witness.wtns", 
+        "proof.json", "public.json"
     ], check=True)
 
     with open("proof.json") as f:
         proof = json.load(f)
     with open("public.json") as f:
         public_json = json.load(f)
-    if isinstance(public_json, dict):
-        public_signals = list(public_json.values())[0]
-    else:
-        public_signals = public_json
-    public_signals = [str(x) for x in public_signals]
 
-    # Convert proof to on-chain format (Groth16 Solidity verifier expects this)
-    def to_hex(x):
-        if isinstance(x, str):
-            return hex(int(x))
-        return [to_hex(i) for i in x]
+    public_signals = public_json if isinstance(public_json, list) else list(public_json.values())[0]
+    public_signals = [str(x) for x in public_signals]
 
     onchain_proof = {
         "a": [str(int(proof["pi_a"][0])), str(int(proof["pi_a"][1]))],
@@ -134,52 +146,65 @@ def validate():
         data = request.json
         user_id = data.get('user_id')
         credential_id = data.get('credential_id')
+        if not user_id or not credential_id:
+            return jsonify({"status": "error", "message": "Missing user_id or credential_id"}), 400
 
         cur.execute("SELECT name, credential_id FROM users WHERE user_id = %s", (user_id,))
         result = cur.fetchone()
 
-        if result:
-            name, stored_credential_id = result
-            if stored_credential_id == credential_id:
-                otp = str(secrets.randbelow(900000) + 100000)
-                otp_storage[user_id] = otp
-
-                zk_result = generate_real_zk_proof_credential_id(credential_id)
-                zkp_proof = json.dumps(zk_result)
-
-                cur.execute("""
-                    INSERT INTO zkp_storage (user_id, zkp_proof)
-                    VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO UPDATE
-                    SET zkp_proof = EXCLUDED.zkp_proof
-                """, (user_id, zkp_proof))
-                conn.commit()
-
-                return jsonify({"status": "success", "otp": otp}), 200
-            else:
-                return jsonify({"status": "error", "message": "Fingerprint verification failed"}), 403
-        else:
+        if not result:
             return jsonify({"status": "error", "message": "User not found"}), 404
+
+        name, stored_cred_id = result
+        if stored_cred_id != credential_id:
+            return jsonify({"status": "error", "message": "Fingerprint verification failed"}), 403
+
+        otp = str(secrets.randbelow(900000) + 100000)
+        otp_storage[user_id] = otp
+
+        zk_result = generate_real_zk_proof_credential_id(credential_id)
+        zkp_proof = json.dumps(zk_result)
+
+        cur.execute("""
+            INSERT INTO zkp_storage (user_id, zkp_proof)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET zkp_proof = EXCLUDED.zkp_proof
+        """, (user_id, zkp_proof))
+        conn.commit()
+
+        return jsonify({"status": "success", "otp": otp}), 200
     except Exception as e:
+        conn.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/get_zkp', methods=['POST'])
 def get_zkp():
-    data = request.json
-    user_id = data.get('user_id')
-    otp = data.get('otp')
-    if otp_storage.get(user_id) == otp:
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        otp = data.get('otp')
+
+        if not user_id or not otp:
+            return jsonify({"status": "error", "message": "Missing user_id or otp"}), 400
+
+        if otp_storage.get(user_id) != otp:
+            return jsonify({"status": "error", "message": "Invalid OTP"}), 403
+
         cur.execute("SELECT zkp_proof FROM zkp_storage WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
-        if row:
-            # Delete the ZKP after fetching
-            cur.execute("DELETE FROM zkp_storage WHERE user_id = %s", (user_id,))
-            conn.commit()
-            return jsonify({"status": "success", "zkp": json.loads(row[0])}), 200
-        else:
+        if not row:
             return jsonify({"status": "error", "message": "No ZKP found"}), 404
-    else:
-        return jsonify({"status": "error", "message": "Invalid OTP"}), 403
+
+        # Clear OTP and delete ZKP for single-use security
+        otp_storage.pop(user_id, None)
+        cur.execute("DELETE FROM zkp_storage WHERE user_id = %s", (user_id,))
+        conn.commit()
+
+        return jsonify({"status": "success", "zkp": json.loads(row[0])}), 200
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
