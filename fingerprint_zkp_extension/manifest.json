@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Fingerprint ZKP Fetcher",
-  "version": "1.0",
-  "description": "Fetches ZKP using user ID and OTP, and passes it to Web3 pages.",
+  "version": "1.1",
+  "description": "Fetches ZKP using user ID and OTP, and securely passes it to Web3Flix.",
   "permissions": ["scripting", "activeTab"],
   "host_permissions": [
-    "https://fingerprint-auth-using-zkp.onrender.com/"
+    "https://fingerprint-auth-using-zkp.onrender.com/",
+    "https://web3flix-netflix-on-blockchain.onrender.com/"
   ],
   "action": {
     "default_popup": "popup.html"
@@ -14,6 +15,6 @@
     "service_worker": "background.js"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'"
+    "extension_pages": "script-src 'self'; object-src 'self';"
   }
 }
