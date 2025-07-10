@@ -1,210 +1,135 @@
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import psycopg2
-import secrets
 import json
-import subprocess
 import os
-import shutil
-import base64
+import hashlib
+import time
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+import subprocess
 
-app = Flask(__name__, template_folder='templates')
+load_dotenv()
+
+app = Flask(__name__)
 CORS(app)
 
-# PostgreSQL connection setup
-try:
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
-    cur = conn.cursor()
-except Exception as e:
-    print(f"Failed to connect to DB: {e}")
-    raise
+# Load encryption keys for onion routing
+KEY1 = os.getenv("ONION_KEY1").encode()
+KEY2 = os.getenv("ONION_KEY2").encode()
+KEY3 = os.getenv("ONION_KEY3").encode()
 
-# Create necessary tables
-try:
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            name TEXT,
-            dob TEXT,
-            country TEXT,
-            credential_id TEXT UNIQUE
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS zkp_storage (
-            user_id TEXT PRIMARY KEY REFERENCES users(user_id),
-            zkp_proof TEXT
-        )
-    """)
-    conn.commit()
-except Exception as e:
-    conn.rollback()
-    print(f"Table creation failed: {e}")
-    raise
+fernet1 = Fernet(KEY1)
+fernet2 = Fernet(KEY2)
+fernet3 = Fernet(KEY3)
 
-# In-memory OTP store
-otp_storage = {}
+# PostgreSQL DB config
+DB_URL = os.getenv("DATABASE_URL")
 
+# Onion encryption
+def onion_encrypt(data: str) -> str:
+    step1 = fernet1.encrypt(data.encode())
+    step2 = fernet2.encrypt(step1)
+    step3 = fernet3.encrypt(step2)
+    return step3.decode()
+
+# Onion decryption
+def onion_decrypt(data: str) -> str:
+    step1 = fernet3.decrypt(data.encode())
+    step2 = fernet2.decrypt(step1)
+    step3 = fernet1.decrypt(step2)
+    return step3.decode()
+
+# Home page
 @app.route('/')
 def index():
     return render_template('index.html')
 
+# Validate page
 @app.route('/validate_page')
 def validate_page():
     return render_template('validate.html')
 
+# User Registration
 @app.route('/register', methods=['POST'])
 def register():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    name = data.get('name')
+    dob = data.get('dob')
+    country = data.get('country')
+    fingerprint_template = data.get('fingerprint_template')
+
+    if not all([user_id, name, dob, country, fingerprint_template]):
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+
     try:
-        data = request.json
-        required_fields = ['user_id', 'name', 'dob', 'country', 'credential_id']
-        for field in required_fields:
-            if not data.get(field):
-                return jsonify({"status": "error", "message": f"Missing field: {field}"}), 400
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+
+        fingerprint_hash = hashlib.sha256(fingerprint_template.encode()).hexdigest()
+        encrypted_hash = onion_encrypt(fingerprint_hash)
 
         cur.execute("""
-            INSERT INTO users (user_id, name, dob, country, credential_id)
+            INSERT INTO users (user_id, name, dob, country, fingerprint_hash)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE SET
-                name = EXCLUDED.name,
-                dob = EXCLUDED.dob,
-                country = EXCLUDED.country,
-                credential_id = EXCLUDED.credential_id
-        """, (
-            data["user_id"],
-            data["name"],
-            data["dob"],
-            data["country"],
-            data["credential_id"]
-        ))
+            ON CONFLICT (user_id) DO NOTHING
+        """, (user_id, name, dob, country, encrypted_hash))
+
         conn.commit()
-
-        return jsonify({"status": "success", "message": "User registered successfully"}), 200
+        cur.close()
+        conn.close()
+        return jsonify({'status': 'success', 'message': 'User registered'})
     except Exception as e:
-        conn.rollback()
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-def generate_real_zk_proof_credential_id(credential_id_b64):
+# Generate ZKP
+@app.route('/generate-proof', methods=['POST'])
+def generate_proof():
+    data = request.get_json()
+    user_id = data.get('user_id')
+
     try:
-        cred_bytes = base64.b64decode(credential_id_b64)
-    except Exception:
-        raise ValueError("Invalid base64 credential_id")
-
-    cred_bytes = list(cred_bytes)[:32]
-    cred_bytes += [0] * (32 - len(cred_bytes))
-
-    if len(cred_bytes) != 32:
-        raise ValueError("credential_id bytes must be exactly 32 bytes")
-
-    input_data = {"credential_id": cred_bytes}
-    with open("input.json", "w") as f:
-        json.dump(input_data, f)
-
-    subprocess.run([
-        "node", "CredentialIDHash_js/generate_witness.js", 
-        "CredentialIDHash_js/CredentialIDHash.wasm", 
-        "input.json", "witness.wtns"
-    ], check=True)
-
-    snarkjs_path = shutil.which("snarkjs")
-    if not snarkjs_path:
-        raise FileNotFoundError("snarkjs not found in PATH")
-
-    subprocess.run([
-        snarkjs_path, "groth16", "prove", 
-        "CredentialIDHash_final.zkey", "witness.wtns", 
-        "proof.json", "public.json"
-    ], check=True)
-
-    with open("proof.json") as f:
-        proof = json.load(f)
-    with open("public.json") as f:
-        public_json = json.load(f)
-
-    public_signals = public_json if isinstance(public_json, list) else list(public_json.values())[0]
-    public_signals = [str(x) for x in public_signals]
-
-    onchain_proof = {
-        "a": [str(int(proof["pi_a"][0])), str(int(proof["pi_a"][1]))],
-        "b": [
-            [str(int(proof["pi_b"][0][1])), str(int(proof["pi_b"][0][0]))],
-            [str(int(proof["pi_b"][1][1])), str(int(proof["pi_b"][1][0]))]
-        ],
-        "c": [str(int(proof["pi_c"][0])), str(int(proof["pi_c"][1]))],
-        "publicSignals": public_signals
-    }
-
-    return {
-        "proof": proof,
-        "public": public_signals,
-        "onchain_proof": onchain_proof
-    }
-
-@app.route('/validate', methods=['POST'])
-def validate():
-    try:
-        data = request.json
-        user_id = data.get('user_id')
-        credential_id = data.get('credential_id')
-        if not user_id or not credential_id:
-            return jsonify({"status": "error", "message": "Missing user_id or credential_id"}), 400
-
-        cur.execute("SELECT name, credential_id FROM users WHERE user_id = %s", (user_id,))
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT fingerprint_hash FROM users WHERE user_id = %s", (user_id,))
         result = cur.fetchone()
+        cur.close()
+        conn.close()
 
         if not result:
-            return jsonify({"status": "error", "message": "User not found"}), 404
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
 
-        name, stored_cred_id = result
-        if stored_cred_id != credential_id:
-            return jsonify({"status": "error", "message": "Fingerprint verification failed"}), 403
+        encrypted_hash = result[0]
+        fingerprint_hash = onion_decrypt(encrypted_hash)
 
-        otp = str(secrets.randbelow(900000) + 100000)
-        otp_storage[user_id] = otp
+        # Store fingerprint hash to input.json (for witness generation)
+        with open("input.json", "w") as f:
+            json.dump({"fingerprintHash": int(fingerprint_hash, 16)}, f)
 
-        zk_result = generate_real_zk_proof_credential_id(credential_id)
-        zkp_proof = json.dumps(zk_result)
+        subprocess.run(["node", "generate_witness.js"])
+        subprocess.run(["node", "generate_proof.js"])
 
-        cur.execute("""
-            INSERT INTO zkp_storage (user_id, zkp_proof)
-            VALUES (%s, %s)
-            ON CONFLICT (user_id) DO UPDATE
-            SET zkp_proof = EXCLUDED.zkp_proof
-        """, (user_id, zkp_proof))
-        conn.commit()
+        with open("zkp.json") as f:
+            zkp_data = json.load(f)
 
-        return jsonify({"status": "success", "otp": otp}), 200
+        return jsonify({'status': 'success', 'zkp': zkp_data})
     except Exception as e:
-        conn.rollback()
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# Get ZKP via OTP (extension)
 @app.route('/get_zkp', methods=['POST'])
 def get_zkp():
-    try:
-        data = request.json
-        user_id = data.get('user_id')
-        otp = data.get('otp')
+    data = request.get_json()
+    user_id = data.get('user_id')
+    otp = data.get('otp')
 
-        if not user_id or not otp:
-            return jsonify({"status": "error", "message": "Missing user_id or otp"}), 400
+    if not user_id or not otp:
+        return jsonify({'status': 'error', 'message': 'Missing fields'}), 400
 
-        if otp_storage.get(user_id) != otp:
-            return jsonify({"status": "error", "message": "Invalid OTP"}), 403
+    # You can add OTP expiry or validation if needed here
 
-        cur.execute("SELECT zkp_proof FROM zkp_storage WHERE user_id = %s", (user_id,))
-        row = cur.fetchone()
-        if not row:
-            return jsonify({"status": "error", "message": "No ZKP found"}), 404
-
-        # Clear OTP and delete ZKP for single-use security
-        otp_storage.pop(user_id, None)
-        cur.execute("DELETE FROM zkp_storage WHERE user_id = %s", (user_id,))
-        conn.commit()
-
-        return jsonify({"status": "success", "zkp": json.loads(row[0])}), 200
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return generate_proof()
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(debug=True)
