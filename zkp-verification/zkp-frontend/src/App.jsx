@@ -3,7 +3,6 @@ import { ethers } from 'ethers';
 import './App.css';
 import verifierArtifact from './abi/Groth16Verifier.json';
 
-// ✅ Load from .env (Vite handles import.meta.env)
 const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS;
 const HMAC_SECRET = import.meta.env.VITE_HMAC_SECRET;
 
@@ -19,12 +18,29 @@ function validateProofStructure(proof) {
     Array.isArray(proof.c) &&
     proof.a.length === 2 &&
     proof.b.length === 2 &&
-    Array.isArray(proof.b[0]) &&
-    Array.isArray(proof.b[1]) &&
     proof.b[0].length === 2 &&
     proof.b[1].length === 2 &&
     proof.c.length === 2
   );
+}
+
+// HMAC verification in browser
+async function verifyHMAC(payload, timestamp, receivedHMAC) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(HMAC_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+  const valid = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    Uint8Array.from(atob(receivedHMAC), c => c.charCodeAt(0)),
+    encoder.encode(JSON.stringify(payload) + timestamp)
+  );
+  return valid;
 }
 
 function App() {
@@ -40,63 +56,48 @@ function App() {
     }
 
     const handleZkpMessage = async (event) => {
-      if (event.data?.type === 'ZKP_DATA') {
-        const { onchain_proof, user_id, timestamp, hmac } = event.data.payload || {};
+      const { type, payload, timestamp, hmac } = event.data || {};
 
-        if (!onchain_proof || !user_id || !timestamp || !hmac) {
-          setStatus('❌ Incomplete ZKP payload from extension.');
-          return;
-        }
+      if (type !== 'ZKP_DATA') return;
 
-        // ✅ HMAC validation
-        const encoder = new TextEncoder();
-        const key = await crypto.subtle.importKey(
-          'raw',
-          encoder.encode(HMAC_SECRET),
-          { name: 'HMAC', hash: 'SHA-256' },
-          false,
-          ['verify']
-        );
-
-        const rawData = `${JSON.stringify(onchain_proof)}|${user_id}|${timestamp}`;
-        const isValid = await crypto.subtle.verify(
-          'HMAC',
-          key,
-          Uint8Array.from(atob(hmac), c => c.charCodeAt(0)),
-          encoder.encode(rawData)
-        );
-
-        if (!isValid) {
-          setStatus('❌ HMAC signature mismatch. Possible tampering detected.');
-          return;
-        }
-
-        // ✅ Timestamp validation (5 minutes max age)
-        const now = Date.now();
-        if (Math.abs(now - Number(timestamp)) > 5 * 60 * 1000) {
-          setStatus('❌ Timestamp is too old or invalid. Rejecting payload.');
-          return;
-        }
-
-        if (!users[user_id]) {
-          setStatus('❌ User ID not authorized.');
-          return;
-        }
-
-        if (!validateProofStructure(onchain_proof)) {
-          setStatus('❌ Invalid ZKP structure received.');
-          return;
-        }
-
-        setProof({
-          a: onchain_proof.a,
-          b: onchain_proof.b,
-          c: onchain_proof.c,
-        });
-        setPublicSignals(onchain_proof.publicSignals);
-        setUserId(user_id);
-        setStatus('✅ ZKP and User ID received securely from extension.');
+      if (!payload?.onchain_proof || !payload?.user_id || !timestamp || !hmac) {
+        setStatus('❌ Incomplete ZKP payload from extension.');
+        return;
       }
+
+      // Reject messages older than 30 seconds
+      const now = Date.now();
+      if (Math.abs(now - timestamp) > 30000) {
+        setStatus('❌ Message timestamp too old or invalid.');
+        return;
+      }
+
+      const isValid = await verifyHMAC(payload, timestamp, hmac);
+      if (!isValid) {
+        setStatus('❌ HMAC verification failed.');
+        return;
+      }
+
+      const { onchain_proof, user_id } = payload;
+
+      if (!users[user_id]) {
+        setStatus('❌ User ID not authorized.');
+        return;
+      }
+
+      if (!validateProofStructure(onchain_proof)) {
+        setStatus('❌ Invalid ZKP structure received.');
+        return;
+      }
+
+      setProof({
+        a: onchain_proof.a,
+        b: onchain_proof.b,
+        c: onchain_proof.c,
+      });
+      setPublicSignals(onchain_proof.publicSignals);
+      setUserId(user_id);
+      setStatus('✅ Secure ZKP and User ID received from extension.');
     };
 
     window.addEventListener('message', handleZkpMessage);
