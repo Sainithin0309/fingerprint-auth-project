@@ -3,7 +3,9 @@ import { ethers } from 'ethers';
 import './App.css';
 import verifierArtifact from './abi/Groth16Verifier.json';
 
-const CONTRACT_ADDRESS = '0x9457BE3F595c8504e4105a6306b92d65F6CaeEE9'; // Sepolia deployed contract
+// ✅ Load from .env (Vite handles import.meta.env)
+const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS;
+const HMAC_SECRET = import.meta.env.VITE_HMAC_SECRET;
 
 const users = {
   Sai123: { name: 'Sainithin', access: 'Full access' },
@@ -37,12 +39,42 @@ function App() {
       setStatus('⚠️ Please use HTTPS for secure Web3 interactions.');
     }
 
-    const handleZkpMessage = (event) => {
+    const handleZkpMessage = async (event) => {
       if (event.data?.type === 'ZKP_DATA') {
-        const { onchain_proof, user_id } = event.data.payload || {};
+        const { onchain_proof, user_id, timestamp, hmac } = event.data.payload || {};
 
-        if (!onchain_proof || !user_id) {
-          setStatus('❌ Incomplete ZKP data from extension.');
+        if (!onchain_proof || !user_id || !timestamp || !hmac) {
+          setStatus('❌ Incomplete ZKP payload from extension.');
+          return;
+        }
+
+        // ✅ HMAC validation
+        const encoder = new TextEncoder();
+        const key = await crypto.subtle.importKey(
+          'raw',
+          encoder.encode(HMAC_SECRET),
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['verify']
+        );
+
+        const rawData = `${JSON.stringify(onchain_proof)}|${user_id}|${timestamp}`;
+        const isValid = await crypto.subtle.verify(
+          'HMAC',
+          key,
+          Uint8Array.from(atob(hmac), c => c.charCodeAt(0)),
+          encoder.encode(rawData)
+        );
+
+        if (!isValid) {
+          setStatus('❌ HMAC signature mismatch. Possible tampering detected.');
+          return;
+        }
+
+        // ✅ Timestamp validation (5 minutes max age)
+        const now = Date.now();
+        if (Math.abs(now - Number(timestamp)) > 5 * 60 * 1000) {
+          setStatus('❌ Timestamp is too old or invalid. Rejecting payload.');
           return;
         }
 
