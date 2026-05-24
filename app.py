@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import time
 from cryptography.fernet import Fernet
+from ssi_did import (get_or_create_issuer, issue_vc, verify_vc,
+                     revoke_vc, check_revocation, get_status_list, resolve_did)
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)
@@ -499,3 +501,107 @@ def health():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# ── SSI / DID / VC Routes ─────────────────────────────────────────────────────
+# Add these routes to your existing app.py
+# Also add this import at the top of app.py:
+#   from ssi_did import get_or_create_issuer, issue_vc, verify_vc, revoke_vc, check_revocation, get_status_list, resolve_did
+
+@app.route('/did/issuer', methods=['GET'])
+def get_issuer_did():
+    """Return the issuer's DID Document."""
+    issuer = get_or_create_issuer()
+    doc = resolve_did(issuer['did'])
+    return jsonify(doc)
+
+
+@app.route('/vc/issue', methods=['POST'])
+def issue_credential():
+    """
+    Issue a W3C VC 2.0 credential after successful ZKP authentication.
+    Expects: { user_id, proof_hash, commitment }
+    """
+    data = request.get_json()
+    user_id = data.get('user_id')
+    proof_hash = data.get('proof_hash')
+    commitment = data.get('commitment', '')
+
+    if not user_id or not proof_hash:
+        return jsonify({'error': 'user_id and proof_hash required'}), 400
+
+    issuer = get_or_create_issuer()
+
+    # Subject DID — derive from user_id (deterministic, no PII on-chain)
+    import hashlib
+    subject_hash = hashlib.sha256(user_id.encode()).hexdigest()[:32]
+    subject_did = f"did:peuap:{subject_hash}"
+
+    vc = issue_vc(
+        issuer_did=issuer['did'],
+        issuer_private_key_hex=issuer['private_key_hex'],
+        subject_id=subject_did,
+        credential_claims={
+            "biometricCommitment": commitment,
+            "authenticationMethod": "Groth16-ZKP-Poseidon",
+            "assuranceLevel": "high"
+        },
+        proof_hash=proof_hash,
+        valid_days=365
+    )
+
+    return jsonify({'status': 'issued', 'credential': vc})
+
+
+@app.route('/vc/verify', methods=['POST'])
+def verify_credential():
+    """Verify a VC's signature and revocation status."""
+    data = request.get_json()
+    vc = data.get('credential')
+    if not vc:
+        return jsonify({'error': 'credential required'}), 400
+
+    # Check revocation
+    vc_id = vc.get('id', '')
+    if check_revocation(vc_id):
+        return jsonify({'valid': False, 'reason': 'Credential has been revoked'}), 200
+
+    result = verify_vc(vc)
+    return jsonify(result)
+
+
+@app.route('/vc/revoke', methods=['POST'])
+def revoke_credential():
+    """
+    Revoke a VC — implements GDPR cryptographic erasure.
+    The ZKP proof hash is retained on-chain for audit; only the VC is invalidated.
+    """
+    data = request.get_json()
+    vc_id = data.get('vc_id')
+    if not vc_id:
+        return jsonify({'error': 'vc_id required'}), 400
+
+    issuer = get_or_create_issuer()
+    result = revoke_vc(vc_id, issuer['private_key_hex'])
+    return jsonify(result)
+
+
+@app.route('/vc/status-list', methods=['GET'])
+def vc_status_list():
+    """Return the Bitstring Status List credential."""
+    return jsonify(get_status_list())
+
+
+@app.route('/vc/status/<vc_id>', methods=['GET'])
+def vc_status(vc_id):
+    """Check revocation status of a specific VC."""
+    revoked = check_revocation(vc_id)
+    return jsonify({'vc_id': vc_id, 'revoked': revoked})
+
+
+@app.route('/did/resolve/<path:did>', methods=['GET'])
+def resolve_did_endpoint(did):
+    """Resolve a DID to its DID Document."""
+    try:
+        doc = resolve_did(did)
+        return jsonify(doc)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
