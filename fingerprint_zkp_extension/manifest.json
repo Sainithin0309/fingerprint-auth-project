@@ -6,7 +6,7 @@
   "permissions": ["tabs", "scripting", "activeTab"],
   "host_permissions": [
     "https://fingerprint-auth-using-zkp.onrender.com/",
-    "https://web3flix-netflix-on-blockchain.onrender.com/*"
+    "https://peuap-w3-dapp1.onrender.com/*"
   ],
   "action": {
     "default_popup": "popup.html"
@@ -16,7 +16,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://web3flix-netflix-on-blockchain.onrender.com/*"],
+      "matches": ["https://peuap-w3-dapp1.onrender.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

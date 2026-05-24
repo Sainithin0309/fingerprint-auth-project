@@ -3,7 +3,7 @@ let fetchedZKP = null;
 const HMAC_SECRET = 'SJ4VX1xDC2Ha9IZeDq2auS2afr9DufKUrzwAb4=';
 const BACKEND_URL = 'https://fingerprint-auth-using-zkp.onrender.com';
 // Update this to your deployed React dApp URL on Render/Vercel
-const DAPP_URL = 'https://web3flix-netflix-on-blockchain.onrender.com/';
+const DAPP_URL = 'https://peuap-w3-dapp1.onrender.com/';
 
 function sanitizeInput(value) {
   return value.replace(/[^\w\-]/g, '');
