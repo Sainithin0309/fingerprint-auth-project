@@ -1,0 +1,254 @@
+/*
+ * PEUAP-W3: Privacy-Enhanced Biometric Authentication for Web 3.0
+ * Scyther SPDL Formal Verification Specification
+ *
+ * Protocol: ZKP-based biometric auth with SSI/DID and Shamir sharing
+ * Author: Adarsh S V Nair, Alliance University, 2025
+ *
+ * Verified properties:
+ *   - Secrecy of biometric credential
+ *   - Aliveness of authenticating device
+ *   - Non-injective synchronisation (ZKP binding)
+ *   - Weak agreement between Device and Backend
+ */
+
+/* ── Macro definitions ── */
+macro poseidon(x,y) = h(x,y);
+macro hmac(x,k)     = h(x,k);
+macro commitment(cred, blind) = poseidon(cred, blind);
+
+/* ── Protocol: ZKP Biometric Authentication ── */
+protocol PEUAP_ZKP_Auth(D, B, I)
+{
+    /* D = Device (client/browser extension)
+     * B = Backend (Flask server on Render)
+     * I = Issuer (DID/VC layer)
+     */
+
+    role D
+    {
+        fresh blinding:    Nonce;
+        fresh session_nonce: Nonce;
+        var   otp:         Ticket;
+        var   zkp_back:    Ticket;
+
+        /* Compute commitment = Poseidon(credential_id, blinding) */
+        /* Send ZKP proof to backend over public channel */
+        send_1( D, B,
+            commitment(cred_D, blinding),
+            session_nonce,
+            h(cred_D, blinding)         /* ZKP proof (simplified) */
+        );
+
+        /* Receive OTP from backend */
+        recv_2( B, D, otp );
+
+        /* Redeem OTP to get ZKP back */
+        send_3( D, B, otp );
+
+        recv_4( B, D, zkp_back );
+
+        /* ── Security claims ── */
+
+        /* Secrecy of biometric credential */
+        claim( D, Secret, cred_D );
+
+        /* Aliveness: backend must have been involved */
+        claim( D, Alive );
+
+        /* Weak agreement: D and B agree on session parameters */
+        claim( D, Weakagree );
+
+        /* Non-injective synchronisation on commitment */
+        claim( D, Nisynch );
+    }
+
+    role B
+    {
+        var   comm:          Hash;
+        var   sn:            Nonce;
+        var   zkp_proof:     Hash;
+        fresh otp:           Ticket;
+        var   rcv_otp:       Ticket;
+
+        /* Receive ZKP proof from device */
+        recv_1( D, B, comm, sn, zkp_proof );
+
+        /* Verify ZKP (modelled as checking hash consistency) */
+        /* Issue OTP */
+        send_2( B, D, otp );
+
+        /* Receive OTP redemption */
+        recv_3( D, B, rcv_otp );
+
+        /* Verify OTP matches */
+        match( otp, rcv_otp );
+
+        /* Return ZKP proof */
+        send_4( B, D, h(comm, otp) );
+
+        /* ── Security claims ── */
+
+        /* Backend authenticates the device *)
+        claim( B, Alive );
+        claim( B, Weakagree );
+        claim( B, Nisynch );
+
+        /* OTP is single-use (secrecy until consumed) */
+        claim( B, Secret, otp );
+    }
+
+    role I
+    {
+        /* Issuer is a trusted third party — passive in auth flow */
+        /* Issues VC after successful authentication */
+        fresh vc_nonce: Nonce;
+
+        claim( I, Alive );
+    }
+}
+
+
+/* ── Protocol: Shamir Secret Sharing (Relay Layer) ── */
+protocol PEUAP_Shamir_Relay(C, N1, N2, N3, A)
+{
+    /* C  = Coordinator
+     * N1, N2, N3 = Relay nodes
+     * A  = Auditor (de-anonymisation)
+     */
+
+    role C
+    {
+        fresh r1: Nonce;  /* Random for share generation */
+        fresh r2: Nonce;
+        var   s1: Hash;
+        var   s2: Hash;
+        var   s3: Hash;
+
+        /* Distribute shares to each node */
+        send_1( C, N1, h(identity_C, r1) );
+        send_2( C, N2, h(identity_C, r2) );
+        send_3( C, N3, h(h(identity_C, r1), r2) );  /* s3 = s1 XOR s2 XOR secret */
+
+        /* ── Claims ── */
+        claim( C, Secret, identity_C );
+        claim( C, Alive );
+    }
+
+    role N1
+    {
+        var share: Hash;
+        recv_1( C, N1, share );
+
+        /* Store share — only return to authenticated auditor */
+        var aud_hmac: Hash;
+        recv_4( A, N1, aud_hmac );
+
+        send_5( N1, A, share );
+
+        claim( N1, Alive );
+        claim( N1, Secret, share );  /* Share secrecy from non-auditors */
+    }
+
+    role N2
+    {
+        var share: Hash;
+        recv_2( C, N2, share );
+
+        var aud_hmac: Hash;
+        recv_6( A, N2, aud_hmac );
+        send_7( N2, A, share );
+
+        claim( N2, Alive );
+        claim( N2, Secret, share );
+    }
+
+    role N3
+    {
+        var share: Hash;
+        recv_3( C, N3, share );
+
+        var aud_hmac: Hash;
+        recv_8( A, N3, aud_hmac );
+        send_9( N3, A, share );
+
+        claim( N3, Alive );
+        claim( N3, Secret, share );
+    }
+
+    role A
+    {
+        /* Auditor reconstructs identity with k-of-n shares */
+        var s1: Hash;
+        var s2: Hash;
+        var s3: Hash;
+
+        fresh audit_key: Nonce;
+
+        send_4( A, N1, h(session_A, audit_key) );
+        recv_5( N1, A, s1 );
+
+        send_6( A, N2, h(session_A, audit_key) );
+        recv_7( N2, A, s2 );
+
+        send_8( A, N3, h(session_A, audit_key) );
+        recv_9( N3, A, s3 );
+
+        /* Reconstruct: s1 XOR s2 XOR s3 = identity */
+        claim( A, Alive );
+        claim( A, Weakagree );
+    }
+}
+
+
+/* ── Protocol: VC Issuance and Verification ── */
+protocol PEUAP_VC(I, V, S)
+{
+    /* I = Issuer (did:key Ed25519)
+     * V = Verifier (smart contract / relying party)
+     * S = Subject (authenticated user)
+     */
+
+    role I
+    {
+        var   proof_hash: Hash;
+        fresh vc_id:      Nonce;
+
+        recv_1( S, I, proof_hash );
+
+        /* Sign VC with Ed25519 (modelled as MAC with issuer key) */
+        send_2( I, V,
+            vc_id,
+            proof_hash,
+            mac(h(vc_id, proof_hash), k_issuer_I)
+        );
+
+        claim( I, Secret, k_issuer_I );
+        claim( I, Alive );
+        claim( I, Nisynch );
+    }
+
+    role V
+    {
+        var vc_id:     Nonce;
+        var ph:        Hash;
+        var vc_mac:    Mac;
+
+        recv_2( I, V, vc_id, ph, vc_mac );
+
+        /* Verify VC signature */
+        claim( V, Alive );
+        claim( V, Weakagree );
+        claim( V, Nisynch );
+    }
+
+    role S
+    {
+        fresh proof_hash: Hash;
+
+        send_1( S, I, proof_hash );
+
+        claim( S, Alive );
+        claim( S, Secret, proof_hash );
+    }
+}

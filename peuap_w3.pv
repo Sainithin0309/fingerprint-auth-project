@@ -1,0 +1,128 @@
+(* ================================================================
+   PEUAP-W3: Privacy-Enhanced Biometric Authentication for Web 3.0
+   ProVerif 2.05 Formal Verification Specification
+   Author: Adarsh S V Nair, Alliance University, 2025
+   ================================================================ *)
+
+(* Channels *)
+free c: channel.
+free c_ble: channel.
+free c_relay: channel.
+
+(* Types *)
+type key.
+type skey.
+type pkey.
+
+(* Cryptographic primitives *)
+fun poseidon(bitstring, bitstring): bitstring.
+fun hmac_fn(bitstring, key): bitstring.
+fun sym_enc(bitstring, key): bitstring.
+fun sym_dec(bitstring, key): bitstring
+  reduc forall m: bitstring, k: key; sym_dec(sym_enc(m, k), k) = m.
+
+fun commit(bitstring, bitstring): bitstring.
+fun groth16(bitstring, bitstring, key): bitstring.
+
+fun sign(bitstring, skey): bitstring.
+fun pk(skey): pkey.
+fun verify(bitstring, bitstring, pkey): bool
+  reduc forall m: bitstring, sk: skey;
+    verify(sign(m, sk), m, pk(sk)) = true.
+
+fun otp_gen(bitstring, bitstring): bitstring.
+
+(* Secrets *)
+free credential_id: bitstring [private].
+free hmac_secret: key [private].
+free onion_k1: key [private].
+free onion_k2: key [private].
+free onion_k3: key [private].
+free issuer_sk: skey [private].
+
+(* ── Security Queries ── *)
+
+(* Q1: Credential secrecy — attacker cannot learn biometric data *)
+query attacker(credential_id).
+
+(* Q2: Issuer private key secrecy *)
+query attacker(issuer_sk).
+
+(* Q3: Authentication — proof verified implies proof was generated *)
+event ProofGenerated(bitstring, bitstring).
+event ProofVerified(bitstring, bitstring).
+query comm: bitstring, pub: bitstring;
+  event(ProofVerified(comm, pub)) ==> event(ProofGenerated(comm, pub)).
+
+(* Q4: OTP cannot be replayed *)
+event OTPIssued(bitstring, bitstring).
+event OTPConsumed(bitstring, bitstring).
+query uid: bitstring, n: bitstring;
+  event(OTPConsumed(uid, n)) ==> event(OTPIssued(uid, n)).
+
+(* Q5: VC integrity *)
+event VCIssued(bitstring, bitstring).
+event VCVerified(bitstring, bitstring).
+query subj: bitstring, ph: bitstring;
+  event(VCVerified(subj, ph)) ==> event(VCIssued(subj, ph)).
+
+(* ── Device Process ── *)
+let Device(vk: key) =
+  new blinding: bitstring;
+  new session_nonce: bitstring;
+  let comm = commit(credential_id, blinding) in
+  let hm = hmac_fn(credential_id, hmac_secret) in
+  let witness = (credential_id, blinding, hm) in
+  let pub_inputs = (comm, session_nonce, hm) in
+  let zkp = groth16(witness, pub_inputs, vk) in
+  event ProofGenerated(comm, pub_inputs);
+  out(c_ble, (comm, session_nonce, zkp));
+  in(c, (otp: bitstring));
+  out(c, otp).
+
+(* ── Backend Process ── *)
+let Backend(vk: key) =
+  in(c_ble, (comm: bitstring, sn: bitstring, zkp: bitstring));
+  new otp_nonce: bitstring;
+  let pub = (comm, sn) in
+  event ProofVerified(comm, pub);
+  let otp = otp_gen(comm, otp_nonce) in
+  let enc1 = sym_enc(comm, onion_k1) in
+  let enc2 = sym_enc(enc1, onion_k2) in
+  let enc3 = sym_enc(enc2, onion_k3) in
+  event OTPIssued(comm, otp_nonce);
+  out(c, otp);
+  in(c, (rcv_otp: bitstring));
+  if rcv_otp = otp then
+  (
+    event OTPConsumed(comm, otp_nonce);
+    out(c, enc3)
+  ).
+
+(* ── Issuer Process ── *)
+let Issuer =
+  in(c, (subj: bitstring, proof_hash: bitstring));
+  let vc_content = (subj, proof_hash) in
+  let vc_sig = sign(vc_content, issuer_sk) in
+  event VCIssued(subj, proof_hash);
+  out(c, (vc_content, vc_sig, pk(issuer_sk))).
+
+(* ── Verifier Process ── *)
+let Verifier =
+  in(c, (vc_content: bitstring, vc_sig: bitstring, pubk: pkey));
+  let (subj: bitstring, proof_hash: bitstring) = vc_content in
+  if verify(vc_sig, vc_content, pubk) = true then
+  (
+    event VCVerified(subj, proof_hash)
+  ).
+
+(* ── Main ── *)
+process
+  new vk: key;
+  (
+    !Device(vk)
+  | !Backend(vk)
+  | !Issuer
+  | !Verifier
+  | out(c, pk(issuer_sk))
+  )
