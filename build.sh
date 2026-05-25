@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
-# Install circom and snarkjs
-npm install -g snarkjs
-npm install -g circom
+# Install Node dependencies (circomlibjs for Poseidon hashing)
+npm install
 
-# Optional: Any circuit preparation steps here
-echo "ZKP tools installed successfully."
+# Install snarkjs globally for proof generation
+npm install -g snarkjs
+
+echo "Node dependencies and ZKP tools installed successfully."
