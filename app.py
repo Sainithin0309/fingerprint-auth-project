@@ -264,7 +264,7 @@ main().catch(e => {{ console.error(e); process.exit(1); }});
     ], check=True)
 
     # Step 3: generate Groth16 proof
-    snarkjs_bin = shutil.which("snarkjs")
+    snarkjs_bin = shutil.which("snarkjs") or os.path.expanduser("~/.npm-global/bin/snarkjs")
     subprocess.run([
         snarkjs_bin, "groth16", "prove",
         "biometric_auth_final.zkey",
