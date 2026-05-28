@@ -322,6 +322,21 @@ def register():
             if not data.get(field):
                 return jsonify({"status": "error", "message": f"Missing {field}"}), 400
 
+        # DOB validation — must be realistic human age (18-120 years)
+        from datetime import datetime, date
+        try:
+            dob_parsed = datetime.strptime(data["dob"], "%Y-%m-%d").date()
+            today = date.today()
+            age = (today - dob_parsed).days // 365
+            if dob_parsed >= today:
+                return jsonify({"status": "error", "message": "Date of birth cannot be in the future"}), 400
+            if age < 18:
+                return jsonify({"status": "error", "message": "User must be at least 18 years old"}), 400
+            if age > 120:
+                return jsonify({"status": "error", "message": "Invalid date of birth — exceeds 120 years"}), 400
+        except ValueError:
+            return jsonify({"status": "error", "message": "Invalid DOB format. Use YYYY-MM-DD (e.g. 1999-03-09)"}), 400
+
         encrypted = {f: onion_encrypt(data[f]) for f in required}
 
         cur.execute("""
