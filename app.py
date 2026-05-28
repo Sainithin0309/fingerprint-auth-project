@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import time
 from cryptography.fernet import Fernet
+from ai_anomaly import check_anomaly
 from ssi_did import (get_or_create_issuer, issue_vc, verify_vc,
                      revoke_vc, check_revocation, get_status_list, resolve_did)
 
@@ -397,6 +398,12 @@ def validate():
         if not found:
             log_event(user_id, "validate_user_not_found", False, ip)
             return jsonify({"status": "error", "message": "User not found"}), 404
+
+        # AI Behavioural Anomaly Check (C5) — before ZKP generation
+        ai_result = check_anomaly(user_id, conn, cur)
+        if ai_result["blocked"]:
+            log_event(user_id, "ai_blocked", False, ip)
+            return jsonify({"status": "error", "message": f"Authentication blocked: {ai_result["reason"]}"}), 403
 
         # Generate ZKP with new biometric_auth circuit
         zk_result = generate_biometric_zkp(credential_id, spo2_value)
