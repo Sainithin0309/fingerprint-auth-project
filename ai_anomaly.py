@@ -10,20 +10,35 @@ Features used:
   2. time_of_day         — current hour (0-23)
   3. consecutive_failures — failures before this attempt
   4. days_since_success  — days since last successful auth
+
+FIX LOG (Step 1 — cold-start bug correction):
+  - Old: new/first-time users received days_since_success = 7.0, the
+    extreme tail of the training distribution (exponential(1.5) clipped
+    to [0,7]) — causing nearly every brand-new legitimate user to be
+    scored as anomalous.
+  - New: new users receive a neutral days_since_success value (1.5, the
+    distribution's mean) instead of its edge.
+  - Old: the "real data" training branch in train_model() hardcoded
+    consecutive_failures=0.0 and days_since=1.0 for every row,
+    discarding real signal once 20+ events accumulated.
+  - New: real training data computes all 4 features properly per row,
+    matching what extract_features() computes at inference time.
 """
 
 import time
+import datetime
 import numpy as np
 
-# Lazy import — only load sklearn when first needed
 _model = None
 _is_trained = False
+
+NEUTRAL_DAYS_SINCE_SUCCESS = 1.5
+
 
 def _get_model():
     global _model
     if _model is None:
         from sklearn.ensemble import IsolationForest
-        # contamination=0.05 means we expect ~5% of traffic to be anomalous
         _model = IsolationForest(
             n_estimators=100,
             contamination=0.05,
@@ -33,16 +48,10 @@ def _get_model():
 
 
 def extract_features(user_id: str, conn, cur) -> list:
-    """
-    Extract 4 behavioural features from auth_events table for a user.
-    Returns a feature vector [attempt_freq, hour, consec_fails, days_since_success]
-    """
     now = int(time.time())
     one_hour_ago = now - 3600
-    thirty_days_ago = now - (30 * 86400)
 
     try:
-        # Feature 1: attempt frequency in last hour
         cur.execute("""
             SELECT COUNT(*) FROM auth_events
             WHERE user_id = %s AND created_at > %s
@@ -50,11 +59,8 @@ def extract_features(user_id: str, conn, cur) -> list:
         row = cur.fetchone()
         attempt_freq = float(row[0]) if row else 0.0
 
-        # Feature 2: current hour of day (0-23)
-        import datetime
         hour_of_day = float(datetime.datetime.utcnow().hour)
 
-        # Feature 3: consecutive failures before this attempt
         cur.execute("""
             SELECT success FROM auth_events
             WHERE user_id = %s
@@ -64,12 +70,11 @@ def extract_features(user_id: str, conn, cur) -> list:
         rows = cur.fetchall()
         consecutive_failures = 0.0
         for row in rows:
-            if not row[0]:  # success = False
+            if not row[0]:
                 consecutive_failures += 1
             else:
-                break  # stop at first success
+                break
 
-        # Feature 4: days since last successful auth
         cur.execute("""
             SELECT created_at FROM auth_events
             WHERE user_id = %s AND success = TRUE AND event_type = 'validate_success'
@@ -80,60 +85,67 @@ def extract_features(user_id: str, conn, cur) -> list:
         if row:
             days_since_success = (now - row[0]) / 86400.0
         else:
-            # Never authenticated before — moderate risk
-            days_since_success = 7.0
+            days_since_success = NEUTRAL_DAYS_SINCE_SUCCESS
 
         return [attempt_freq, hour_of_day, consecutive_failures, days_since_success]
 
     except Exception as e:
         print(f"[AI] Feature extraction error (non-critical): {e}")
-        # Return neutral features on error — don't block on AI failure
-        return [1.0, 12.0, 0.0, 1.0]
+        return [1.0, 12.0, 0.0, NEUTRAL_DAYS_SINCE_SUCCESS]
 
 
 def get_synthetic_training_data() -> np.ndarray:
-    """
-    Generate synthetic training data representing normal authentication patterns.
-    Used to pre-train the model before real data accumulates.
-
-    Normal patterns:
-      - 1-3 attempts per hour
-      - Business hours (8-20) weighted heavily
-      - 0-1 consecutive failures
-      - 0-7 days since last success
-
-    Anomalous patterns (5% contamination built into model):
-      - 10+ attempts per hour (brute force)
-      - Off-hours (0-6am)
-      - 5+ consecutive failures then success
-      - 30+ days gap (stolen dormant credential)
-    """
     np.random.seed(42)
     n = 500
-
-    # Normal samples (480)
     normal = np.column_stack([
-        np.random.poisson(1.5, n),                    # attempt_freq: mostly 1-3
-        np.random.normal(13, 3, n).clip(8, 20),       # hour: business hours
-        np.random.poisson(0.3, n).clip(0, 2),         # consec_fails: 0-2
-        np.random.exponential(1.5, n).clip(0, 7),     # days_since: 0-7
+        np.random.poisson(1.5, n),
+        np.random.normal(13, 3, n).clip(8, 20),
+        np.random.poisson(0.3, n).clip(0, 2),
+        np.random.exponential(1.5, n).clip(0, 7),
     ])
-
     return normal
 
 
+def _compute_features_for_row(user_id, created_at, success, all_rows):
+    """Replicates extract_features() logic for a historical training row."""
+    one_hour_before = created_at - 3600
+
+    attempt_freq = sum(
+        1 for r in all_rows
+        if r[0] == user_id and one_hour_before <= r[1] <= created_at
+    )
+
+    hour = (created_at % 86400) // 3600 if created_at else 12
+
+    user_rows_before = sorted(
+        [r for r in all_rows if r[0] == user_id and r[1] <= created_at],
+        key=lambda r: r[1], reverse=True
+    )
+    consecutive_failures = 0.0
+    for r in user_rows_before:
+        if not r[2]:
+            consecutive_failures += 1
+        else:
+            break
+
+    prior_successes = [
+        r[1] for r in all_rows
+        if r[0] == user_id and r[2] and r[1] < created_at
+    ]
+    if prior_successes:
+        days_since = (created_at - max(prior_successes)) / 86400.0
+    else:
+        days_since = NEUTRAL_DAYS_SINCE_SUCCESS
+
+    return [float(attempt_freq), float(hour), consecutive_failures, days_since]
+
+
 def train_model(conn, cur) -> bool:
-    """
-    Train the Isolation Forest on auth_events data.
-    Falls back to synthetic data if fewer than 20 real events exist.
-    Returns True if training succeeded.
-    """
     global _is_trained
 
     try:
         model = _get_model()
 
-        # Try to get real training data first
         cur.execute("""
             SELECT user_id, created_at, success FROM auth_events
             ORDER BY created_at DESC
@@ -142,21 +154,13 @@ def train_model(conn, cur) -> bool:
         rows = cur.fetchall()
 
         if len(rows) >= 20:
-            # Build feature matrix from real data
-            # Simplified: use attempt counts and time patterns
-            features = []
-            for i, row in enumerate(rows):
-                user_id, created_at, success = row
-                # Count attempts in surrounding window
-                window_start = created_at - 3600
-                nearby = sum(1 for r in rows if r[1] and window_start <= r[1] <= created_at + 1)
-                hour = (created_at % 86400) // 3600 if created_at else 12
-                features.append([float(nearby), float(hour), 0.0, 1.0])
-
+            features = [
+                _compute_features_for_row(user_id, created_at, success, rows)
+                for user_id, created_at, success in rows
+            ]
             X = np.array(features)
-            print(f"[AI] Training on {len(X)} real auth events")
+            print(f"[AI] Training on {len(X)} real auth events (corrected feature extraction)")
         else:
-            # Use synthetic data
             X = get_synthetic_training_data()
             print(f"[AI] Training on synthetic data ({len(X)} samples) — real data accumulating")
 
@@ -171,42 +175,25 @@ def train_model(conn, cur) -> bool:
 
 
 def check_anomaly(user_id: str, conn, cur) -> dict:
-    """
-    Main function called from /validate route.
-
-    Returns:
-        {
-          "blocked": bool,
-          "score": float (0.0-1.0, higher = more anomalous),
-          "reason": str
-        }
-
-    Never raises — on any error, returns {"blocked": False} to avoid
-    blocking legitimate users due to AI failures.
-    """
     try:
         global _is_trained
 
-        # Train model if not yet trained
         if not _is_trained:
             train_model(conn, cur)
 
-        # If still not trained (error), allow through
         if not _is_trained:
             return {"blocked": False, "score": 0.0, "reason": "model_unavailable"}
 
         model = _get_model()
 
-        # Extract features for this user
         features = extract_features(user_id, conn, cur)
+        is_new_user = (features[3] == NEUTRAL_DAYS_SINCE_SUCCESS)
+
         X = np.array([features])
 
-        # Isolation Forest: -1 = anomaly, 1 = normal
         prediction = model.predict(X)[0]
-        raw_score = model.score_samples(X)[0]  # more negative = more anomalous
+        raw_score = model.score_samples(X)[0]
 
-        # Normalise score to 0-1 (0 = normal, 1 = anomalous)
-        # Typical range: -0.5 (anomaly) to 0.1 (normal)
         normalised = max(0.0, min(1.0, (-raw_score - 0.1) / 0.6))
 
         THRESHOLD = 0.80
@@ -225,14 +212,15 @@ def check_anomaly(user_id: str, conn, cur) -> dict:
 
             reason = ", ".join(reasons) if reasons else "anomalous pattern detected"
 
-            print(f"[AI] BLOCKED user={user_id} score={normalised:.2f} reason={reason}")
+            print(f"[AI] BLOCKED user={user_id} score={normalised:.2f} "
+                  f"reason={reason} new_user={is_new_user}")
             return {
                 "blocked": True,
                 "score": round(normalised, 3),
                 "reason": reason
             }
 
-        print(f"[AI] ALLOWED user={user_id} score={normalised:.2f}")
+        print(f"[AI] ALLOWED user={user_id} score={normalised:.2f} new_user={is_new_user}")
         return {
             "blocked": False,
             "score": round(normalised, 3),
@@ -240,6 +228,5 @@ def check_anomaly(user_id: str, conn, cur) -> dict:
         }
 
     except Exception as e:
-        # Never block on AI error — fail open (allow) with log
         print(f"[AI] Anomaly check error (allowing through): {e}")
         return {"blocked": False, "score": 0.0, "reason": f"error: {e}"}

@@ -10,6 +10,7 @@ import shutil
 import hashlib
 import hmac
 import time
+from datetime import datetime, date
 from cryptography.fernet import Fernet
 from ai_anomaly import check_anomaly
 from ssi_did import (get_or_create_issuer, issue_vc, verify_vc,
@@ -95,7 +96,7 @@ def init_tables():
             );
         """)
 
-        # NEW: OTP storage in DB (replaces in-memory dict)
+        # OTP storage in DB (replaces in-memory dict)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS otp_store (
                 user_id    TEXT PRIMARY KEY,
@@ -105,7 +106,7 @@ def init_tables():
             );
         """)
 
-        # NEW: Auth events log (for AI anomaly detection later)
+        # Auth events log (for AI anomaly detection)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS auth_events (
                 id            SERIAL PRIMARY KEY,
@@ -114,8 +115,16 @@ def init_tables():
                 success       BOOLEAN,
                 ip_address    TEXT,
                 attempt_count INTEGER DEFAULT 1,
-                created_at    BIGINT
+                created_at    BIGINT,
+                spo2_value    INTEGER
             );
+        """)
+
+        # SpO2 logging (Step 2): if auth_events already existed without
+        # spo2_value (pre-upgrade deployments), add the column safely.
+        cur.execute("""
+            ALTER TABLE auth_events
+            ADD COLUMN IF NOT EXISTS spo2_value INTEGER;
         """)
 
         conn.commit()
@@ -162,14 +171,19 @@ def otp_delete(user_id: str):
 
 # ─────────────────────────────────────────────
 # AUTH EVENT LOGGER
+# Now also logs spo2_value (Step 2: SpO2 logging for future pattern
+# anomaly detection — Option 3). spo2_value is optional and defaults
+# to NULL for event types where it doesn't apply (e.g. register).
 # ─────────────────────────────────────────────
-def log_event(user_id: str, event_type: str, success: bool, ip: str = None):
+def log_event(user_id: str, event_type: str, success: bool, ip: str = None,
+              spo2_value: int = None):
     try:
         conn, cur = get_db()
         cur.execute("""
-            INSERT INTO auth_events (user_id, event_type, success, ip_address, created_at)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (user_id, event_type, success, ip, int(time.time())))
+            INSERT INTO auth_events (user_id, event_type, success, ip_address,
+                                     created_at, spo2_value)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (user_id, event_type, success, ip, int(time.time()), spo2_value))
         conn.commit()
     except Exception as e:
         print(f"Event logging failed (non-critical): {e}")
@@ -315,6 +329,7 @@ def validate_page():
 def register():
     """Unchanged — onion encryption preserved exactly."""
     conn, cur = get_db()
+    data = {}
     try:
         data = request.json
         required = ['user_id', 'name', 'dob', 'country', 'credential_id']
@@ -323,7 +338,6 @@ def register():
                 return jsonify({"status": "error", "message": f"Missing {field}"}), 400
 
         # DOB validation — must be realistic human age (18-120 years)
-        from datetime import datetime, date
         try:
             dob_parsed = datetime.strptime(data["dob"], "%Y-%m-%d").date()
             today = date.today()
@@ -353,8 +367,7 @@ def register():
         ))
         conn.commit()
 
-        log_event(data["user_id"], "register", True,
-                  request.remote_addr)
+        log_event(data["user_id"], "register", True, request.remote_addr)
 
         return jsonify({"status": "success", "message": "User registered securely"}), 200
 
@@ -370,9 +383,14 @@ def validate():
     """
     Validates fingerprint credential, generates ZKP with new circuit,
     stores OTP in PostgreSQL (not in-memory).
+
+    Step 2 update: spo2_value is now persisted to auth_events on every
+    validate-related event (success, failure, AI block, liveness fail)
+    so that a future per-user SpO2 pattern model has real data to train on.
     """
     conn, cur = get_db()
     ip = request.remote_addr
+    data = {}
     try:
         data = request.json
         user_id      = data.get('user_id')
@@ -386,7 +404,7 @@ def validate():
 
         # Validate SpO2 range before even generating proof
         if not (85 <= spo2_value <= 100):
-            log_event(user_id, "validate_liveness_fail", False, ip)
+            log_event(user_id, "validate_liveness_fail", False, ip, spo2_value)
             return jsonify({"status": "error",
                             "message": "Liveness check failed: SpO2 out of range"}), 403
 
@@ -401,7 +419,7 @@ def validate():
                 if dec_uid == user_id:
                     dec_cred = onion_decrypt(enc_cred)
                     if dec_cred != credential_id:
-                        log_event(user_id, "validate_cred_fail", False, ip)
+                        log_event(user_id, "validate_cred_fail", False, ip, spo2_value)
                         return jsonify({"status": "error",
                                         "message": "Fingerprint verification failed"}), 403
                     found             = True
@@ -411,14 +429,18 @@ def validate():
                 continue
 
         if not found:
-            log_event(user_id, "validate_user_not_found", False, ip)
+            log_event(user_id, "validate_user_not_found", False, ip, spo2_value)
             return jsonify({"status": "error", "message": "User not found"}), 404
 
         # AI Behavioural Anomaly Check (C5) — before ZKP generation
         ai_result = check_anomaly(user_id, conn, cur)
         if ai_result["blocked"]:
-            log_event(user_id, "ai_blocked", False, ip)
-            return jsonify({"status": "error", "message": f"Authentication blocked: {ai_result["reason"]}"}), 403
+            log_event(user_id, "ai_blocked", False, ip, spo2_value)
+            block_reason = ai_result["reason"]
+            return jsonify({
+                "status": "error",
+                "message": f"Authentication blocked: {block_reason}"
+            }), 403
 
         # Generate ZKP with new biometric_auth circuit
         zk_result = generate_biometric_zkp(credential_id, spo2_value)
@@ -436,14 +458,13 @@ def validate():
         otp_store(user_id, otp)
 
         conn.commit()
-        log_event(user_id, "validate_success", True, ip)
+        log_event(user_id, "validate_success", True, ip, spo2_value)
 
         return jsonify({"status": "success", "otp": otp}), 200
 
     except Exception as e:
         conn.rollback()
-        log_event(data.get("user_id", "unknown") if 'data' in dir() else "unknown",
-                  "validate_error", False, ip)
+        log_event(data.get("user_id", "unknown"), "validate_error", False, ip)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -455,6 +476,7 @@ def get_zkp():
     """
     conn, cur = get_db()
     ip = request.remote_addr
+    data = {}
     try:
         data    = request.json
         user_id = data.get('user_id')
@@ -502,8 +524,7 @@ def get_zkp():
 
     except Exception as e:
         conn.rollback()
-        log_event(data.get("user_id", "unknown") if 'data' in dir() else "unknown",
-                  "get_zkp_error", False, ip)
+        log_event(data.get("user_id", "unknown"), "get_zkp_error", False, ip)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -521,12 +542,9 @@ def health():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-# ── SSI / DID / VC Routes ─────────────────────────────────────────────────────
-# Add these routes to your existing app.py
-# Also add this import at the top of app.py:
-#   from ssi_did import get_or_create_issuer, issue_vc, verify_vc, revoke_vc, check_revocation, get_status_list, resolve_did
+# ─────────────────────────────────────────────
+# SSI / DID / VC ROUTES
+# ─────────────────────────────────────────────
 
 @app.route('/did/issuer', methods=['GET'])
 def get_issuer_did():
@@ -553,7 +571,6 @@ def issue_credential():
     issuer = get_or_create_issuer()
 
     # Subject DID — derive from user_id (deterministic, no PII on-chain)
-    import hashlib
     subject_hash = hashlib.sha256(user_id.encode()).hexdigest()[:32]
     subject_did = f"did:peuap:{subject_hash}"
 
@@ -627,3 +644,7 @@ def resolve_did_endpoint(did):
         return jsonify(doc)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
