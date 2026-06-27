@@ -120,7 +120,7 @@ def init_tables():
             );
         """)
 
-        # SpO2 logging (Step 2): if auth_events already existed without
+        # SpO2 logging: if auth_events already existed without
         # spo2_value (pre-upgrade deployments), add the column safely.
         cur.execute("""
             ALTER TABLE auth_events
@@ -171,9 +171,9 @@ def otp_delete(user_id: str):
 
 # ─────────────────────────────────────────────
 # AUTH EVENT LOGGER
-# Now also logs spo2_value (Step 2: SpO2 logging for future pattern
-# anomaly detection — Option 3). spo2_value is optional and defaults
-# to NULL for event types where it doesn't apply (e.g. register).
+# Now also logs spo2_value for future pattern anomaly detection.
+# spo2_value is optional and defaults to NULL for event types where
+# it doesn't apply (e.g. register).
 # ─────────────────────────────────────────────
 def log_event(user_id: str, event_type: str, success: bool, ip: str = None,
               spo2_value: int = None):
@@ -384,9 +384,10 @@ def validate():
     Validates fingerprint credential, generates ZKP with new circuit,
     stores OTP in PostgreSQL (not in-memory).
 
-    Step 2 update: spo2_value is now persisted to auth_events on every
-    validate-related event (success, failure, AI block, liveness fail)
-    so that a future per-user SpO2 pattern model has real data to train on.
+    The generated ZKP proof is onion-encrypted before storage in
+    zkp_storage, using the same 3-layer Fernet encryption already
+    applied to the users table, so the proof is never persisted in
+    plaintext at rest.
     """
     conn, cur = get_db()
     ip = request.remote_addr
@@ -444,14 +445,19 @@ def validate():
 
         # Generate ZKP with new biometric_auth circuit
         zk_result = generate_biometric_zkp(credential_id, spo2_value)
-        zkp_proof  = json.dumps(zk_result)
+        zkp_proof_plain = json.dumps(zk_result)
 
-        # Store ZKP
+        # Encrypt the ZKP proof before storing — same 3-layer onion
+        # encryption already used for the users table, so the proof
+        # is never written to PostgreSQL in plaintext.
+        zkp_proof_encrypted = onion_encrypt(zkp_proof_plain)
+
+        # Store encrypted ZKP
         cur.execute("""
             INSERT INTO zkp_storage (user_id, zkp_proof)
             VALUES (%s, %s)
             ON CONFLICT (user_id) DO UPDATE SET zkp_proof = EXCLUDED.zkp_proof;
-        """, (encrypted_user_id, zkp_proof))
+        """, (encrypted_user_id, zkp_proof_encrypted))
 
         # Generate OTP and store in PostgreSQL (not in-memory dict)
         otp = str(secrets.randbelow(900000) + 100000)
@@ -472,7 +478,9 @@ def validate():
 def get_zkp():
     """
     Validates OTP (from PostgreSQL), returns ZKP, deletes both.
-    Unchanged logic — improved OTP backend only.
+
+    The stored ZKP proof is onion-encrypted at rest (see /validate),
+    so it is decrypted here before being returned to the caller.
     """
     conn, cur = get_db()
     ip = request.remote_addr
@@ -505,12 +513,15 @@ def get_zkp():
         if not encrypted_user_id:
             return jsonify({"status": "error", "message": "User not found"}), 404
 
-        # Fetch ZKP
+        # Fetch encrypted ZKP
         cur.execute("SELECT zkp_proof FROM zkp_storage WHERE user_id = %s",
                     (encrypted_user_id,))
         row = cur.fetchone()
         if not row:
             return jsonify({"status": "error", "message": "No ZKP found"}), 404
+
+        # Decrypt the ZKP proof before returning it to the caller
+        zkp_proof_decrypted = onion_decrypt(row[0])
 
         # Delete OTP + ZKP (ephemeral — one-time use)
         otp_delete(user_id)
@@ -520,7 +531,7 @@ def get_zkp():
 
         log_event(user_id, "get_zkp_success", True, ip)
 
-        return jsonify({"status": "success", "zkp": json.loads(row[0])}), 200
+        return jsonify({"status": "success", "zkp": json.loads(zkp_proof_decrypted)}), 200
 
     except Exception as e:
         conn.rollback()
