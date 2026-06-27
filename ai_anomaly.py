@@ -1,33 +1,22 @@
 """
-ai_anomaly.py — Behavioural Anomaly Detection for PEUAP-W3
-Contribution C5: Isolation Forest trained on auth_events table
+ai_anomaly.py — Hybrid Behavioural Anomaly Detection for PEUAP-W3
+Contribution C5: Isolation Forest + Rule-Based Detector (ensemble)
 
-Sits in /validate route after credential match, before ZKP generation.
-Blocks suspicious authentication attempts without exposing user identity.
+Combines two independent models:
+  1. Isolation Forest (unsupervised, learns from accumulated data)
+  2. Rule-based detector (fixed, deterministic, data-independent)
 
-Features used:
-  1. attempt_frequency   — how many attempts in the last hour
-  2. time_of_day         — current hour (0-23)
-  3. consecutive_failures — failures before this attempt
-  4. days_since_success  — days since last successful auth
-
-FIX LOG (Step 1 — cold-start bug correction):
-  - Old: new/first-time users received days_since_success = 7.0, the
-    extreme tail of the training distribution (exponential(1.5) clipped
-    to [0,7]) — causing nearly every brand-new legitimate user to be
-    scored as anomalous.
-  - New: new users receive a neutral days_since_success value (1.5, the
-    distribution's mean) instead of its edge.
-  - Old: the "real data" training branch in train_model() hardcoded
-    consecutive_failures=0.0 and days_since=1.0 for every row,
-    discarding real signal once 20+ events accumulated.
-  - New: real training data computes all 4 features properly per row,
-    matching what extract_features() computes at inference time.
+Ensemble logic: if EITHER model blocks, the request is blocked.
+This means the rule-based model acts as a safeguard — even if the
+Isolation Forest's training data becomes skewed or contaminated,
+the fixed rules still catch genuine attack patterns and still
+protect first-time users from false positives.
 """
 
 import time
 import datetime
 import numpy as np
+from rule_based import evaluate_rules, RULE_THRESHOLDS
 
 _model = None
 _is_trained = False
@@ -107,16 +96,12 @@ def get_synthetic_training_data() -> np.ndarray:
 
 
 def _compute_features_for_row(user_id, created_at, success, all_rows):
-    """Replicates extract_features() logic for a historical training row."""
     one_hour_before = created_at - 3600
-
     attempt_freq = sum(
         1 for r in all_rows
         if r[0] == user_id and one_hour_before <= r[1] <= created_at
     )
-
     hour = (created_at % 86400) // 3600 if created_at else 12
-
     user_rows_before = sorted(
         [r for r in all_rows if r[0] == user_id and r[1] <= created_at],
         key=lambda r: r[1], reverse=True
@@ -127,7 +112,6 @@ def _compute_features_for_row(user_id, created_at, success, all_rows):
             consecutive_failures += 1
         else:
             break
-
     prior_successes = [
         r[1] for r in all_rows
         if r[0] == user_id and r[2] and r[1] < created_at
@@ -136,16 +120,13 @@ def _compute_features_for_row(user_id, created_at, success, all_rows):
         days_since = (created_at - max(prior_successes)) / 86400.0
     else:
         days_since = NEUTRAL_DAYS_SINCE_SUCCESS
-
     return [float(attempt_freq), float(hour), consecutive_failures, days_since]
 
 
 def train_model(conn, cur) -> bool:
     global _is_trained
-
     try:
         model = _get_model()
-
         cur.execute("""
             SELECT user_id, created_at, success FROM auth_events
             ORDER BY created_at DESC
@@ -159,10 +140,10 @@ def train_model(conn, cur) -> bool:
                 for user_id, created_at, success in rows
             ]
             X = np.array(features)
-            print(f"[AI] Training on {len(X)} real auth events (corrected feature extraction)")
+            print(f"[AI] Isolation Forest training on {len(X)} real auth events")
         else:
             X = get_synthetic_training_data()
-            print(f"[AI] Training on synthetic data ({len(X)} samples) — real data accumulating")
+            print(f"[AI] Isolation Forest training on synthetic data ({len(X)} samples)")
 
         model.fit(X)
         _is_trained = True
@@ -175,58 +156,83 @@ def train_model(conn, cur) -> bool:
 
 
 def check_anomaly(user_id: str, conn, cur) -> dict:
+    """
+    HYBRID decision: combines Isolation Forest (statistical) with
+    rule_based_detector (deterministic) results.
+
+    Decision logic: BLOCK if EITHER model blocks. This ensures the
+    fixed rule-based safeguards always apply, regardless of whether
+    the statistical model's training data is clean or contaminated.
+    """
     try:
         global _is_trained
-
-        if not _is_trained:
-            train_model(conn, cur)
-
-        if not _is_trained:
-            return {"blocked": False, "score": 0.0, "reason": "model_unavailable"}
-
-        model = _get_model()
 
         features = extract_features(user_id, conn, cur)
         is_new_user = (features[3] == NEUTRAL_DAYS_SINCE_SUCCESS)
 
-        X = np.array([features])
+        # ---- Model 1: Isolation Forest ----
+        if not _is_trained:
+            train_model(conn, cur)
 
-        prediction = model.predict(X)[0]
-        raw_score = model.score_samples(X)[0]
+        if_result = {"blocked": False, "score": 0.0, "reason": "model_unavailable"}
+        if _is_trained:
+            model = _get_model()
+            X = np.array([features])
+            raw_score = model.score_samples(X)[0]
+            normalised = max(0.0, min(1.0, (-raw_score - 0.1) / 0.6))
+            THRESHOLD = 0.80
 
-        normalised = max(0.0, min(1.0, (-raw_score - 0.1) / 0.6))
+            if normalised > THRESHOLD:
+                attempt_freq, hour, consec_fails, days_since = features
+                reasons = []
+                if attempt_freq > 8:
+                    reasons.append(f"high attempt frequency ({int(attempt_freq)}/hr)")
+                if hour < 5 or hour > 23:
+                    reasons.append(f"unusual time ({int(hour):02d}:00 UTC)")
+                if consec_fails >= 4:
+                    reasons.append(f"{int(consec_fails)} consecutive failures")
+                if days_since > 25:
+                    reasons.append(f"dormant credential ({int(days_since)} days)")
+                reason = ", ".join(reasons) if reasons else "anomalous pattern detected"
+                if_result = {"blocked": True, "score": round(normalised, 3), "reason": reason}
+            else:
+                if_result = {"blocked": False, "score": round(normalised, 3), "reason": "normal"}
 
-        THRESHOLD = 0.80
+        # ---- Model 2: Rule-Based Detector ----
+        rule_result = evaluate_rules(features, is_new_user)
 
-        if normalised > THRESHOLD:
-            attempt_freq, hour, consec_fails, days_since = features
-            reasons = []
-            if attempt_freq > 8:
-                reasons.append(f"high attempt frequency ({int(attempt_freq)}/hr)")
-            if hour < 5 or hour > 23:
-                reasons.append(f"unusual time ({int(hour):02d}:00 UTC)")
-            if consec_fails >= 4:
-                reasons.append(f"{int(consec_fails)} consecutive failures")
-            if days_since > 25:
-                reasons.append(f"dormant credential ({int(days_since)} days)")
+        # ---- Ensemble Decision: block if EITHER model blocks ----
+        final_blocked = if_result["blocked"] or rule_result["blocked"]
 
-            reason = ", ".join(reasons) if reasons else "anomalous pattern detected"
+        if final_blocked:
+            reasons_combined = []
+            if if_result["blocked"]:
+                reasons_combined.append(f"[IsolationForest] {if_result['reason']}")
+            if rule_result["blocked"]:
+                reasons_combined.append(f"[RuleBased] {rule_result['reason']}")
+            combined_reason = "; ".join(reasons_combined)
 
-            print(f"[AI] BLOCKED user={user_id} score={normalised:.2f} "
-                  f"reason={reason} new_user={is_new_user}")
+            print(f"[AI-Hybrid] BLOCKED user={user_id} "
+                  f"if_score={if_result['score']:.2f} rule_triggered={rule_result['blocked']} "
+                  f"new_user={is_new_user}")
             return {
                 "blocked": True,
-                "score": round(normalised, 3),
-                "reason": reason
+                "score": max(if_result["score"], rule_result["score"]),
+                "reason": combined_reason,
+                "isolation_forest": if_result,
+                "rule_based": rule_result
             }
 
-        print(f"[AI] ALLOWED user={user_id} score={normalised:.2f} new_user={is_new_user}")
+        print(f"[AI-Hybrid] ALLOWED user={user_id} "
+              f"if_score={if_result['score']:.2f} new_user={is_new_user}")
         return {
             "blocked": False,
-            "score": round(normalised, 3),
-            "reason": "normal"
+            "score": max(if_result["score"], rule_result["score"]),
+            "reason": "normal",
+            "isolation_forest": if_result,
+            "rule_based": rule_result
         }
 
     except Exception as e:
-        print(f"[AI] Anomaly check error (allowing through): {e}")
+        print(f"[AI-Hybrid] Anomaly check error (allowing through): {e}")
         return {"blocked": False, "score": 0.0, "reason": f"error: {e}"}
