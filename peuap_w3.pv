@@ -24,6 +24,10 @@ fun sym_dec(bitstring, key): bitstring
 fun commit(bitstring, bitstring): bitstring.
 fun groth16(bitstring, bitstring, key): bitstring.
 
+fun zkverify(bitstring, bitstring, key): bool
+  reduc forall w: bitstring, p: bitstring, k: key;
+    zkverify(groth16(w, p, k), p, k) = true.
+
 fun sign(bitstring, skey): bitstring.
 fun pk(skey): pkey.
 fun verify(bitstring, bitstring, pkey): bool
@@ -76,15 +80,16 @@ let Device(vk: key) =
   let pub_inputs = (comm, session_nonce, hm) in
   let zkp = groth16(witness, pub_inputs, vk) in
   event ProofGenerated(comm, pub_inputs);
-  out(c_ble, (comm, session_nonce, zkp));
+  out(c_ble, (comm, session_nonce, hm, zkp));
   in(c, (otp: bitstring));
   out(c, otp).
 
 (* ── Backend Process ── *)
 let Backend(vk: key) =
-  in(c_ble, (comm: bitstring, sn: bitstring, zkp: bitstring));
+  in(c_ble, (comm: bitstring, sn: bitstring, hm_in: bitstring, zkp: bitstring));
   new otp_nonce: bitstring;
-  let pub = (comm, sn) in
+  let pub = (comm, sn, hm_in) in
+  if zkverify(zkp, pub, vk) = true then
   event ProofVerified(comm, pub);
   let otp = otp_gen(comm, otp_nonce) in
   let enc1 = sym_enc(comm, onion_k1) in
@@ -105,13 +110,13 @@ let Issuer =
   let vc_content = (subj, proof_hash) in
   let vc_sig = sign(vc_content, issuer_sk) in
   event VCIssued(subj, proof_hash);
-  out(c, (vc_content, vc_sig, pk(issuer_sk))).
+  out(c, (vc_content, vc_sig)).
 
 (* ── Verifier Process ── *)
 let Verifier =
-  in(c, (vc_content: bitstring, vc_sig: bitstring, pubk: pkey));
+  in(c, (vc_content: bitstring, vc_sig: bitstring));
   let (subj: bitstring, proof_hash: bitstring) = vc_content in
-  if verify(vc_sig, vc_content, pubk) = true then
+  if verify(vc_sig, vc_content, pk(issuer_sk)) = true then
   (
     event VCVerified(subj, proof_hash)
   ).

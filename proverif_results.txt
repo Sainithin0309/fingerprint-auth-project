@@ -11,41 +11,42 @@ Process 0 (that is, the initial process):
     {9}let pub_inputs: bitstring = (comm,session_nonce,hm) in
     {10}let zkp: bitstring = groth16(witness,pub_inputs,vk_1) in
     {11}event ProofGenerated(comm,pub_inputs);
-    {12}out(c_ble, (comm,session_nonce,zkp));
+    {12}out(c_ble, (comm,session_nonce,hm,zkp));
     {13}in(c, otp: bitstring);
     {14}out(c, otp)
 ) | (
     {15}!
     {16}let vk_2: key = vk in
-    {17}in(c_ble, (comm_1: bitstring,sn: bitstring,zkp_1: bitstring));
+    {17}in(c_ble, (comm_1: bitstring,sn: bitstring,hm_in: bitstring,zkp_1: bitstring));
     {18}new otp_nonce: bitstring;
-    {19}let pub: bitstring = (comm_1,sn) in
-    {20}event ProofVerified(comm_1,pub);
-    {21}let otp_1: bitstring = otp_gen(comm_1,otp_nonce) in
-    {22}let enc1: bitstring = sym_enc(comm_1,onion_k1) in
-    {23}let enc2: bitstring = sym_enc(enc1,onion_k2) in
-    {24}let enc3: bitstring = sym_enc(enc2,onion_k3) in
-    {25}event OTPIssued(comm_1,otp_nonce);
-    {26}out(c, otp_1);
-    {27}in(c, rcv_otp: bitstring);
-    {28}if (rcv_otp = otp_1) then
-    {29}event OTPConsumed(comm_1,otp_nonce);
-    {30}out(c, enc3)
+    {19}let pub: bitstring = (comm_1,sn,hm_in) in
+    {20}if (zkverify(zkp_1,pub,vk_2) = true) then
+    {21}event ProofVerified(comm_1,pub);
+    {22}let otp_1: bitstring = otp_gen(comm_1,otp_nonce) in
+    {23}let enc1: bitstring = sym_enc(comm_1,onion_k1) in
+    {24}let enc2: bitstring = sym_enc(enc1,onion_k2) in
+    {25}let enc3: bitstring = sym_enc(enc2,onion_k3) in
+    {26}event OTPIssued(comm_1,otp_nonce);
+    {27}out(c, otp_1);
+    {28}in(c, rcv_otp: bitstring);
+    {29}if (rcv_otp = otp_1) then
+    {30}event OTPConsumed(comm_1,otp_nonce);
+    {31}out(c, enc3)
 ) | (
-    {31}!
-    {32}in(c, (subj: bitstring,proof_hash: bitstring));
-    {33}let vc_content: bitstring = (subj,proof_hash) in
-    {34}let vc_sig: bitstring = sign(vc_content,issuer_sk) in
-    {35}event VCIssued(subj,proof_hash);
-    {36}out(c, (vc_content,vc_sig,pk(issuer_sk)))
+    {32}!
+    {33}in(c, (subj: bitstring,proof_hash: bitstring));
+    {34}let vc_content: bitstring = (subj,proof_hash) in
+    {35}let vc_sig: bitstring = sign(vc_content,issuer_sk) in
+    {36}event VCIssued(subj,proof_hash);
+    {37}out(c, (vc_content,vc_sig))
 ) | (
-    {37}!
-    {38}in(c, (vc_content_1: bitstring,vc_sig_1: bitstring,pubk: pkey));
-    {39}let (subj_1: bitstring,proof_hash_1: bitstring) = vc_content_1 in
-    {40}if (verify(vc_sig_1,vc_content_1,pubk) = true) then
-    {41}event VCVerified(subj_1,proof_hash_1)
+    {38}!
+    {39}in(c, (vc_content_1: bitstring,vc_sig_1: bitstring));
+    {40}let (subj_1: bitstring,proof_hash_1: bitstring) = vc_content_1 in
+    {41}if (verify(vc_sig_1,vc_content_1,pk(issuer_sk)) = true) then
+    {42}event VCVerified(subj_1,proof_hash_1)
 ) | (
-    {42}out(c, pk(issuer_sk))
+    {43}out(c, pk(issuer_sk))
 )
 
 --  Process 1 (that is, process 0, with let moved downwards):
@@ -61,40 +62,42 @@ Process 0 (that is, the initial process):
     {8}let witness: bitstring = (credential_id,blinding,hm) in
     {3}let vk_1: key = vk in
     {10}let zkp: bitstring = groth16(witness,pub_inputs,vk_1) in
-    {12}out(c_ble, (comm,session_nonce,zkp));
+    {12}out(c_ble, (comm,session_nonce,hm,zkp));
     {13}in(c, otp: bitstring);
     {14}out(c, otp)
 ) | (
     {15}!
-    {17}in(c_ble, (comm_1: bitstring,sn: bitstring,zkp_1: bitstring));
+    {17}in(c_ble, (comm_1: bitstring,sn: bitstring,hm_in: bitstring,zkp_1: bitstring));
     {18}new otp_nonce: bitstring;
-    {19}let pub: bitstring = (comm_1,sn) in
-    {20}event ProofVerified(comm_1,pub);
-    {25}event OTPIssued(comm_1,otp_nonce);
-    {21}let otp_1: bitstring = otp_gen(comm_1,otp_nonce) in
-    {26}out(c, otp_1);
-    {27}in(c, rcv_otp: bitstring);
-    {28}if (rcv_otp = otp_1) then
-    {29}event OTPConsumed(comm_1,otp_nonce);
-    {22}let enc1: bitstring = sym_enc(comm_1,onion_k1) in
-    {23}let enc2: bitstring = sym_enc(enc1,onion_k2) in
-    {24}let enc3: bitstring = sym_enc(enc2,onion_k3) in
-    {30}out(c, enc3)
+    {19}let pub: bitstring = (comm_1,sn,hm_in) in
+    {16}let vk_2: key = vk in
+    {20}if (zkverify(zkp_1,pub,vk_2) = true) then
+    {21}event ProofVerified(comm_1,pub);
+    {26}event OTPIssued(comm_1,otp_nonce);
+    {22}let otp_1: bitstring = otp_gen(comm_1,otp_nonce) in
+    {27}out(c, otp_1);
+    {28}in(c, rcv_otp: bitstring);
+    {29}if (rcv_otp = otp_1) then
+    {30}event OTPConsumed(comm_1,otp_nonce);
+    {23}let enc1: bitstring = sym_enc(comm_1,onion_k1) in
+    {24}let enc2: bitstring = sym_enc(enc1,onion_k2) in
+    {25}let enc3: bitstring = sym_enc(enc2,onion_k3) in
+    {31}out(c, enc3)
 ) | (
-    {31}!
-    {32}in(c, (subj: bitstring,proof_hash: bitstring));
-    {35}event VCIssued(subj,proof_hash);
-    {33}let vc_content: bitstring = (subj,proof_hash) in
-    {34}let vc_sig: bitstring = sign(vc_content,issuer_sk) in
-    {36}out(c, (vc_content,vc_sig,pk(issuer_sk)))
+    {32}!
+    {33}in(c, (subj: bitstring,proof_hash: bitstring));
+    {36}event VCIssued(subj,proof_hash);
+    {34}let vc_content: bitstring = (subj,proof_hash) in
+    {35}let vc_sig: bitstring = sign(vc_content,issuer_sk) in
+    {37}out(c, (vc_content,vc_sig))
 ) | (
-    {37}!
-    {38}in(c, (vc_content_1: bitstring,vc_sig_1: bitstring,pubk: pkey));
-    {39}let (subj_1: bitstring,proof_hash_1: bitstring) = vc_content_1 in
-    {40}if (verify(vc_sig_1,vc_content_1,pubk) = true) then
-    {41}event VCVerified(subj_1,proof_hash_1)
+    {38}!
+    {39}in(c, (vc_content_1: bitstring,vc_sig_1: bitstring));
+    {40}let (subj_1: bitstring,proof_hash_1: bitstring) = vc_content_1 in
+    {41}if (verify(vc_sig_1,vc_content_1,pk(issuer_sk)) = true) then
+    {42}event VCVerified(subj_1,proof_hash_1)
 ) | (
-    {42}out(c, pk(issuer_sk))
+    {43}out(c, pk(issuer_sk))
 )
 
 -- Query not attacker(credential_id[]) in process 1.
@@ -111,118 +114,27 @@ RESULT not attacker(issuer_sk[]) is true.
 Translating the process into Horn clauses...
 Completing...
 Starting query event(ProofVerified(comm_2,pub_1)) ==> event(ProofGenerated(comm_2,pub_1))
-goal reachable: attacker(comm_2) && attacker(sn_1) -> event(ProofVerified(comm_2,(comm_2,sn_1)))
-
-Derivation:
-
-1. The attacker has some term zkp_2.
-attacker(zkp_2).
-
-2. We assume as hypothesis that
-attacker(sn_1).
-
-3. We assume as hypothesis that
-attacker(comm_2).
-
-4. By 3, the attacker may know comm_2.
-By 2, the attacker may know sn_1.
-By 1, the attacker may know zkp_2.
-Using the function 3-tuple the attacker may obtain (comm_2,sn_1,zkp_2).
-attacker((comm_2,sn_1,zkp_2)).
-
-5. The message (comm_2,sn_1,zkp_2) that the attacker may have by 4 may be received at input {17}.
-So event ProofVerified(comm_2,(comm_2,sn_1)) may be executed at {20}.
-event(ProofVerified(comm_2,(comm_2,sn_1))).
-
-6. By 5, event(ProofVerified(comm_2,(comm_2,sn_1))).
-The goal is reached, represented in the following fact:
-event(ProofVerified(comm_2,(comm_2,sn_1))).
-
-
-A more detailed output of the traces is available with
-  set traceDisplay = long.
-
-new vk: key creating vk_3 at {1}
-
-out(c, ~M) with ~M = pk(issuer_sk) at {42}
-
-in(c_ble, (a,a_1,a_2)) at {17} in copy a_3
-
-new otp_nonce: bitstring creating otp_nonce_1 at {18} in copy a_3
-
-event ProofVerified(a,(a,a_1)) at {20} in copy a_3 (goal)
-
-The event ProofVerified(a,(a,a_1)) is executed at {20} in copy a_3.
-A trace has been found.
-RESULT event(ProofVerified(comm_2,pub_1)) ==> event(ProofGenerated(comm_2,pub_1)) is false.
+goal reachable: b-event(ProofGenerated(commit(credential_id[],blinding_1),(commit(credential_id[],blinding_1),session_nonce_1,hmac_fn(credential_id[],hmac_secret[])))) -> event(ProofVerified(commit(credential_id[],blinding_1),(commit(credential_id[],blinding_1),session_nonce_1,hmac_fn(credential_id[],hmac_secret[]))))
+Abbreviations:
+blinding_1 = blinding[!1 = @sid]
+session_nonce_1 = session_nonce[!1 = @sid]
+RESULT event(ProofVerified(comm_2,pub_1)) ==> event(ProofGenerated(comm_2,pub_1)) is true.
 -- Query event(OTPConsumed(uid,n)) ==> event(OTPIssued(uid,n)) in process 1.
 Translating the process into Horn clauses...
 Completing...
 Starting query event(OTPConsumed(uid,n)) ==> event(OTPIssued(uid,n))
-goal reachable: b-event(OTPIssued(uid,otp_nonce_1)) && attacker(uid) && attacker(sn_1) && attacker(zkp_2) -> event(OTPConsumed(uid,otp_nonce_1))
+goal reachable: b-event(OTPIssued(commit(credential_id[],blinding_1),otp_nonce_1)) -> event(OTPConsumed(commit(credential_id[],blinding_1),otp_nonce_1))
 Abbreviations:
-otp_nonce_1 = otp_nonce[zkp_1 = zkp_2,sn = sn_1,comm_1 = uid,!1 = @sid]
+blinding_1 = blinding[!1 = @sid]
+session_nonce_1 = session_nonce[!1 = @sid]
+otp_nonce_1 = otp_nonce[zkp_1 = groth16((credential_id[],blinding_1,hmac_fn(credential_id[],hmac_secret[])),(commit(credential_id[],blinding_1),session_nonce_1,hmac_fn(credential_id[],hmac_secret[])),vk[]),hm_in = hmac_fn(credential_id[],hmac_secret[]),sn = session_nonce_1,comm_1 = commit(credential_id[],blinding_1),!1 = @sid_1]
 RESULT event(OTPConsumed(uid,n)) ==> event(OTPIssued(uid,n)) is true.
 -- Query event(VCVerified(subj_2,ph)) ==> event(VCIssued(subj_2,ph)) in process 1.
 Translating the process into Horn clauses...
 Completing...
 Starting query event(VCVerified(subj_2,ph)) ==> event(VCIssued(subj_2,ph))
-goal reachable: attacker(subj_2) && attacker(ph) -> event(VCVerified(subj_2,ph))
-
-Derivation:
-
-1. The attacker has some term sk.
-attacker(sk).
-
-2. By 1, the attacker may know sk.
-Using the function pk the attacker may obtain pk(sk).
-attacker(pk(sk)).
-
-3. We assume as hypothesis that
-attacker(ph).
-
-4. We assume as hypothesis that
-attacker(subj_2).
-
-5. By 4, the attacker may know subj_2.
-By 3, the attacker may know ph.
-Using the function 2-tuple the attacker may obtain (subj_2,ph).
-attacker((subj_2,ph)).
-
-6. By 5, the attacker may know (subj_2,ph).
-By 1, the attacker may know sk.
-Using the function sign the attacker may obtain sign((subj_2,ph),sk).
-attacker(sign((subj_2,ph),sk)).
-
-7. By 5, the attacker may know (subj_2,ph).
-By 6, the attacker may know sign((subj_2,ph),sk).
-By 2, the attacker may know pk(sk).
-Using the function 3-tuple the attacker may obtain ((subj_2,ph),sign((subj_2,ph),sk),pk(sk)).
-attacker(((subj_2,ph),sign((subj_2,ph),sk),pk(sk))).
-
-8. The message ((subj_2,ph),sign((subj_2,ph),sk),pk(sk)) that the attacker may have by 7 may be received at input {38}.
-So event VCVerified(subj_2,ph) may be executed at {41}.
-event(VCVerified(subj_2,ph)).
-
-9. By 8, event(VCVerified(subj_2,ph)).
-The goal is reached, represented in the following fact:
-event(VCVerified(subj_2,ph)).
-
-
-A more detailed output of the traces is available with
-  set traceDisplay = long.
-
-new vk: key creating vk_3 at {1}
-
-out(c, ~M) with ~M = pk(issuer_sk) at {42}
-
-in(c, ((a,a_1),sign((a,a_1),a_2),pk(a_2))) at {38} in copy a_3
-
-event VCVerified(a,a_1) at {41} in copy a_3 (goal)
-
-The event VCVerified(a,a_1) is executed at {41} in copy a_3.
-A trace has been found.
-RESULT event(VCVerified(subj_2,ph)) ==> event(VCIssued(subj_2,ph)) is false.
+goal reachable: b-event(VCIssued(subj_2,ph)) && attacker(subj_2) && attacker(ph) -> event(VCVerified(subj_2,ph))
+RESULT event(VCVerified(subj_2,ph)) ==> event(VCIssued(subj_2,ph)) is true.
 
 --------------------------------------------------------------
 Verification summary:
@@ -231,11 +143,11 @@ Query not attacker(credential_id[]) is true.
 
 Query not attacker(issuer_sk[]) is true.
 
-Query event(ProofVerified(comm_2,pub_1)) ==> event(ProofGenerated(comm_2,pub_1)) is false.
+Query event(ProofVerified(comm_2,pub_1)) ==> event(ProofGenerated(comm_2,pub_1)) is true.
 
 Query event(OTPConsumed(uid,n)) ==> event(OTPIssued(uid,n)) is true.
 
-Query event(VCVerified(subj_2,ph)) ==> event(VCIssued(subj_2,ph)) is false.
+Query event(VCVerified(subj_2,ph)) ==> event(VCIssued(subj_2,ph)) is true.
 
 --------------------------------------------------------------
 
