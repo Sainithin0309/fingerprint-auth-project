@@ -65,7 +65,8 @@ def onion_decrypt(data: str) -> str:
 # Computes HMAC-SHA256(credential_id, HMAC_SECRET)
 # Returns integer string for Poseidon circuit input
 # ─────────────────────────────────────────────
-HMAC_SECRET = os.environ.get("HMAC_SECRET", "peuap_w3_hmac_secret_key_2025")
+HMAC_SECRET = os.environ["HMAC_SECRET"]  # no fallback: a default here would
+                                        # reduce Theorem 4 to a public constant
 
 def compute_hmac_int(credential_id: str) -> str:
     """Returns HMAC as a decimal integer string (fits BN254 field)."""
