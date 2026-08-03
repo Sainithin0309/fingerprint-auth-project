@@ -238,7 +238,7 @@ def get_or_create_issuer() -> dict:
         # Generate new issuer DID
         _issuer = generate_did_key()
         print(f"[SSI] New issuer DID generated: {_issuer['did']}")
-        print(f"[SSI] Add to Render env: ISSUER_PRIVATE_KEY_HEX={_issuer['private_key_hex']}")
+        print("[SSI] New issuer key generated. Retrieve it from the local keystore; it is not logged.")
 
     return _issuer
 
