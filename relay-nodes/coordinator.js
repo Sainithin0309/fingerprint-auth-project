@@ -54,7 +54,7 @@ function reconstructSecret(shares) {
 // Health — checks all 3 nodes
 app.get("/health", async (req, res) => {
   const statuses = await Promise.allSettled(
-    NODES.map(n => axios.get(`${n.url}/health`, { timeout: 3000 }))
+    NODES.map(n => axios.get(`${n.url}/health`, { timeout: 30000 }))
   );
   const nodeStatus = statuses.map((s, i) => ({
     node: NODES[i].id,
@@ -79,7 +79,7 @@ app.post("/distribute", async (req, res) => {
           share: shares[i],
           proof_hash,
           timestamp: Date.now()
-        }, { timeout: 5000 })
+        }, { timeout: 30000 })
       )
     );
 
@@ -120,7 +120,7 @@ app.post("/reconstruct", async (req, res) => {
         return axios.post(`${node.url}/retrieve-share`, {
           session_id,
           coordinator_hmac: hmac
-        }, { timeout: 5000 });
+        }, { timeout: 30000 });
       })
     );
 
