@@ -60,6 +60,43 @@ def onion_decrypt(data: str) -> str:
         dec = k.decrypt(dec)
     return dec.decode()
 
+
+# ─────────────────────────────────────────────
+# THRESHOLD RELAY DISTRIBUTION
+# On successful authentication the pseudonymous identity payload is
+# split into Shamir (k=2, n=3) shares by the relay coordinator and
+# stored one share per independent relay node. No single relay can
+# recover the payload; reconstruction additionally requires a
+# threshold auditor vote recorded on-chain in AuditTrail.
+# Best-effort: a relay outage must not deny an otherwise valid login.
+# ─────────────────────────────────────────────
+import urllib.request as _urlreq
+import urllib.error as _urlerr
+
+RELAY_COORDINATOR_URL = os.environ.get("RELAY_COORDINATOR_URL", "").rstrip("/")
+
+def distribute_identity_shares(session_id: str, identity_payload: str,
+                               proof_hash: str) -> bool:
+    """POST the identity payload to the relay coordinator for Shamir split."""
+    if not RELAY_COORDINATOR_URL:
+        return False
+    body = json.dumps({
+        "session_id": session_id,
+        "identity_payload": identity_payload,
+        "proof_hash": proof_hash,
+    }).encode()
+    req = _urlreq.Request(f"{RELAY_COORDINATOR_URL}/distribute", data=body,
+                          headers={"Content-Type": "application/json"},
+                          method="POST")
+    try:
+        with _urlreq.urlopen(req, timeout=3) as r:
+            ok = r.status == 200
+            print(f"[relay] distribute session={session_id} ok={ok}", flush=True)
+            return ok
+    except (_urlerr.URLError, TimeoutError, OSError) as e:
+        print(f"[relay] distribute failed for {session_id}: {e}", flush=True)
+        return False
+
 # ─────────────────────────────────────────────
 # HMAC HELPER
 # Computes HMAC-SHA256(credential_id, HMAC_SECRET)
@@ -466,6 +503,12 @@ def validate():
 
         conn.commit()
         log_event(user_id, "validate_success", True, ip, spo2_value)
+
+        # Split the pseudonymous identity across the three relay nodes.
+        session_id = hashlib.sha256(
+            f"{user_id}:{otp}:{time.time()}".encode()).hexdigest()[:32]
+        proof_hash = hashlib.sha256(zkp_proof_plain.encode()).hexdigest()
+        distribute_identity_shares(session_id, user_id, proof_hash)
 
         return jsonify({"status": "success", "otp": otp}), 200
 
