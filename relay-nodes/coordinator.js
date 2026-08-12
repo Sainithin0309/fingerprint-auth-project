@@ -14,7 +14,28 @@ const NODES = [
   { id: "node2", url: process.env.NODE2_URL || "http://localhost:3002", secret: process.env.NODE2_SECRET || "relay2_secret_peuap_2025" },
   { id: "node3", url: process.env.NODE3_URL || "http://localhost:3003", secret: process.env.NODE3_SECRET || "relay3_secret_peuap_2025" },
 ];
-const K = 2; // Minimum shares needed to reconstruct
+const K = 2;
+
+// ── On-chain de-anonymisation gate (AuditTrail, Sepolia) ──
+const { ethers } = require("ethers");
+const AUDIT_ADDRESS = process.env.AUDIT_TRAIL_ADDRESS
+  || "0xCcFb036b694fFAde95177126181f9a8C0887e246";
+const AUDIT_ABI = [
+  "event DeanonExecuted(uint256 indexed requestId, bytes32 indexed pseudonym, uint256 timestamp)"
+];
+
+// Returns true only if a two-of-three auditor vote for this pseudonym has been
+// executed and permanently recorded on chain.
+async function deanonApproved(sessionId) {
+  const rpc = process.env.SEPOLIA_RPC;
+  if (!rpc) throw new Error("SEPOLIA_RPC not configured");
+  const provider = new ethers.JsonRpcProvider(rpc);
+  const audit = new ethers.Contract(AUDIT_ADDRESS, AUDIT_ABI, provider);
+  const pseudonym = ethers.id(sessionId);           // keccak256 -> bytes32
+  const filter = audit.filters.DeanonExecuted(null, pseudonym);
+  const evts = await audit.queryFilter(filter, -50000);
+  return evts.length > 0;
+}
 
 // ── Shamir Secret Sharing (polynomial, GF(256), k-of-n) ──
 const sss = require("shamirs-secret-sharing");
@@ -84,6 +105,12 @@ app.post("/reconstruct", async (req, res) => {
   }
 
   try {
+    if (!(await deanonApproved(session_id))) {
+      return res.status(403).json({
+        error: "no on-chain de-anonymisation approval recorded for this session"
+      });
+    }
+
     const retrievals = await Promise.allSettled(
       NODES.map(node => {
         const hmac = crypto
