@@ -16,28 +16,18 @@ const NODES = [
 ];
 const K = 2; // Minimum shares needed to reconstruct
 
-// ── Shamir Secret Sharing (XOR-based 2-of-3 for prototype) ──
-// In production, replace with the 'shamirs-secret-sharing' npm package
-// for full polynomial GF(256) Shamir shares.
+// ── Shamir Secret Sharing (polynomial, GF(256), k-of-n) ──
+const sss = require("shamirs-secret-sharing");
 
 function splitSecret(secret) {
-  const buf = Buffer.from(secret, "utf8");
-  const s1 = crypto.randomBytes(buf.length);
-  const s2 = crypto.randomBytes(buf.length);
-  const s3 = Buffer.alloc(buf.length);
-  for (let i = 0; i < buf.length; i++) {
-    s3[i] = buf[i] ^ s1[i] ^ s2[i];
-  }
-  return [s1.toString("hex"), s2.toString("hex"), s3.toString("hex")];
+  const shares = sss.split(Buffer.from(secret, "utf8"),
+                           { shares: NODES.length, threshold: K });
+  return shares.map(sh => sh.toString("hex"));
 }
 
 function reconstructSecret(shares) {
-  const bufs = shares.map(s => Buffer.from(s, "hex"));
-  const result = Buffer.alloc(bufs[0].length);
-  for (let i = 0; i < bufs[0].length; i++) {
-    result[i] = bufs[0][i] ^ bufs[1][i] ^ bufs[2][i];
-  }
-  return result.toString("utf8");
+  const bufs = shares.slice(0, K).map(sh => Buffer.from(sh, "hex"));
+  return sss.combine(bufs).toString("utf8");
 }
 
 // Health — checks all 3 nodes
@@ -111,9 +101,9 @@ app.post("/reconstruct", async (req, res) => {
       .filter(r => r.status === "fulfilled")
       .map(r => r.value.data.share);
 
-    if (goodShares.length < NODES.length) {
+    if (goodShares.length < K) {
       return res.status(503).json({
-        error: `Only ${goodShares.length} shares retrieved, need ${NODES.length}`
+        error: `Only ${goodShares.length} shares retrieved, need ${K}`
       });
     }
 
