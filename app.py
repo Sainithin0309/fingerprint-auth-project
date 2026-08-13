@@ -333,6 +333,13 @@ main().catch(e => {{ console.error(e); process.exit(1); }});
 
     public_signals = [str(x) for x in public]
 
+    for _f in ("biometric_auth_input.json", "biometric_auth_witness.wtns",
+               "biometric_auth_proof.json", "biometric_auth_public.json"):
+        try:
+            os.remove(_f)
+        except FileNotFoundError:
+            pass
+
     return {
         "proof"      : proof,
         "public"     : public_signals,
